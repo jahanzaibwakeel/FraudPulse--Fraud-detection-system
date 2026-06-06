@@ -31,3 +31,11 @@ test("risk memory page renders entity risk surface", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "Risk Memory" })).toBeVisible();
   await expect(page.getByText("Highest Risk Entities")).toBeVisible();
 });
+
+test("alert detail opens case investigation workspace", async ({ page }) => {
+  await page.goto("/alerts");
+  await page.locator("tbody a").first().click();
+  await expect(page.getByText("Case Investigation Workspace")).toBeVisible();
+  await expect(page.getByText("Evidence Bundle")).toBeVisible();
+  await expect(page.getByText("Related Device Activity")).toBeVisible();
+});

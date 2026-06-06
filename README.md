@@ -144,6 +144,10 @@ Round 8 adds champion/challenger model governance. The Model Registry page lists
 
 Round 9 adds rolling risk memory for users, cards, merchants, devices, and IP addresses. The scoring worker updates `entity_risk_memory` after each scored transaction, blending alert score, velocity, anomaly strength, merchant risk, and recent evidence. The Risk Memory page surfaces the highest-risk entities and user/merchant profiles include persisted memory risk.
 
+## Case Investigation Workspace
+
+Round 10 upgrades alert detail into a full case investigation workspace. The API builds a single evidence bundle containing the alert, transaction, feature snapshot, entity memory, related user/card/device/IP activity, merchant alert pattern, timeline, and recommended analyst actions. Analysts can save point-in-time evidence snapshots for auditability before final review.
+
 ## Round Roadmap
 
 Completed:
@@ -157,10 +161,10 @@ Completed:
 - Round 7: Model explainability with per-feature trained-model contributions
 - Round 8: Model registry with champion/challenger promotion and rollback
 - Round 9: Entity risk memory for users, cards, devices, IPs, and merchants
+- Round 10: Case investigation workspace with evidence bundles
 
 Remaining:
 
-- Round 10: Case investigation workspace with evidence bundles
 - Round 11: Data quality checks and drift alerting
 - Round 12: Advanced simulation lab for configurable fraud campaigns
 - Round 13: Real model benchmarking across multiple local algorithms

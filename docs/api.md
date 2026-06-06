@@ -63,6 +63,8 @@ Creates a transaction, writes `transaction_created`, and enqueues scoring.
 - `GET /alert-views` lists saved alert queues.
 - `POST /alert-views` creates a saved alert queue.
 - `DELETE /alert-views/:id` deletes a saved alert queue.
+- `GET /cases/:alertId/evidence` returns the investigation evidence bundle for an alert.
+- `POST /cases/:alertId/evidence-snapshots` saves a point-in-time evidence bundle snapshot. Requires analyst.
 - `GET /operations/sla` returns SLA, breach, and workload rollups.
 - `GET /dlq/events` lists dead-letter scoring events.
 - `POST /dlq/events/:id/replay` requeues a failed scoring event.

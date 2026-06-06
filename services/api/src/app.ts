@@ -392,6 +392,234 @@ export const createApp = () => {
     res.json(result.rows[0]);
   });
 
+  app.get("/cases/:alertId/evidence", async (req, res) => {
+    const alertId = z.string().uuid().safeParse(req.params.alertId);
+    if (!alertId.success) return res.status(400).json({ error: "invalid_alert_id" });
+    const base = await query<Record<string, any>>(
+      `SELECT fa.*, row_to_json(t.*) AS transaction, row_to_json(u.*) AS user, row_to_json(m.*) AS merchant,
+        row_to_json(fs.*) AS score_detail,
+        row_to_json(tf.*) AS feature_snapshot
+       FROM fraud_alerts fa
+       JOIN transactions t ON t.id = fa.transaction_id
+       JOIN users u ON u.id = fa.user_id
+       JOIN merchants m ON m.id = fa.merchant_id
+       JOIN fraud_scores fs ON fs.id = fa.fraud_score_id
+       LEFT JOIN transaction_features tf ON tf.transaction_id = fa.transaction_id
+       WHERE fa.id = $1`,
+      [alertId.data]
+    );
+    if (!base.rowCount) return res.status(404).json({ error: "alert_not_found" });
+
+    const alert = base.rows[0];
+    const transaction = alert.transaction as Record<string, any>;
+    const user = alert.user as Record<string, any>;
+    const merchant = alert.merchant as Record<string, any>;
+    const reasons = Array.isArray(alert.reasons) ? alert.reasons : [];
+
+    const [
+      entityRisk,
+      userTransactions,
+      cardTransactions,
+      deviceTransactions,
+      ipTransactions,
+      merchantAlerts,
+      caseNotes,
+      reviews,
+      auditTrail,
+      latestSnapshot
+    ] = await Promise.all([
+      query(
+        `SELECT *
+         FROM entity_risk_memory
+         WHERE (entity_type = 'user' AND entity_id = $1)
+            OR (entity_type = 'card' AND entity_id = $2)
+            OR (entity_type = 'merchant' AND entity_id = $3)
+            OR (entity_type = 'device' AND entity_id = $4)
+            OR (entity_type = 'ip' AND entity_id = $5)
+         ORDER BY risk_score DESC`,
+        [
+          transaction.user_id,
+          transaction.card_id,
+          transaction.merchant_id,
+          transaction.device_fingerprint,
+          String(transaction.ip_address)
+        ]
+      ),
+      query(
+        `SELECT t.id, t.amount, t.currency, t.channel, t.occurred_at, m.name AS merchant_name,
+          fs.score, fs.severity, fa.id AS alert_id, fa.status AS alert_status
+         FROM transactions t
+         JOIN merchants m ON m.id = t.merchant_id
+         LEFT JOIN fraud_scores fs ON fs.transaction_id = t.id
+         LEFT JOIN fraud_alerts fa ON fa.transaction_id = t.id
+         WHERE t.user_id = $1
+         ORDER BY t.occurred_at DESC
+         LIMIT 12`,
+        [transaction.user_id]
+      ),
+      query(
+        `SELECT t.id, t.amount, t.currency, t.channel, t.occurred_at, m.name AS merchant_name,
+          fs.score, fs.severity, fa.id AS alert_id
+         FROM transactions t
+         JOIN merchants m ON m.id = t.merchant_id
+         LEFT JOIN fraud_scores fs ON fs.transaction_id = t.id
+         LEFT JOIN fraud_alerts fa ON fa.transaction_id = t.id
+         WHERE t.card_id = $1 AND t.id <> $2
+         ORDER BY t.occurred_at DESC
+         LIMIT 12`,
+        [transaction.card_id, transaction.id]
+      ),
+      query(
+        `SELECT t.id, t.amount, t.currency, t.channel, t.occurred_at, u.full_name, m.name AS merchant_name,
+          fs.score, fs.severity, fa.id AS alert_id
+         FROM transactions t
+         JOIN users u ON u.id = t.user_id
+         JOIN merchants m ON m.id = t.merchant_id
+         LEFT JOIN fraud_scores fs ON fs.transaction_id = t.id
+         LEFT JOIN fraud_alerts fa ON fa.transaction_id = t.id
+         WHERE t.device_fingerprint = $1 AND t.id <> $2
+         ORDER BY t.occurred_at DESC
+         LIMIT 12`,
+        [transaction.device_fingerprint, transaction.id]
+      ),
+      query(
+        `SELECT t.id, t.amount, t.currency, t.channel, t.occurred_at, u.full_name, m.name AS merchant_name,
+          fs.score, fs.severity, fa.id AS alert_id
+         FROM transactions t
+         JOIN users u ON u.id = t.user_id
+         JOIN merchants m ON m.id = t.merchant_id
+         LEFT JOIN fraud_scores fs ON fs.transaction_id = t.id
+         LEFT JOIN fraud_alerts fa ON fa.transaction_id = t.id
+         WHERE t.ip_address = $1::inet AND t.id <> $2
+         ORDER BY t.occurred_at DESC
+         LIMIT 12`,
+        [String(transaction.ip_address), transaction.id]
+      ),
+      query(
+        `SELECT fa.id, fa.severity, fa.score, fa.status, fa.created_at, u.full_name, t.amount, t.currency
+         FROM fraud_alerts fa
+         JOIN users u ON u.id = fa.user_id
+         JOIN transactions t ON t.id = fa.transaction_id
+         WHERE fa.merchant_id = $1
+         ORDER BY fa.created_at DESC
+         LIMIT 12`,
+        [transaction.merchant_id]
+      ),
+      query("SELECT * FROM alert_case_notes WHERE alert_id = $1 ORDER BY created_at DESC", [alertId.data]),
+      query("SELECT * FROM review_decisions WHERE alert_id = $1 ORDER BY created_at DESC", [alertId.data]),
+      query(
+        "SELECT * FROM audit_logs WHERE entity_type = 'fraud_alert' AND entity_id = $1 ORDER BY created_at DESC LIMIT 30",
+        [alertId.data]
+      ),
+      query("SELECT * FROM case_evidence_snapshots WHERE alert_id = $1 ORDER BY created_at DESC LIMIT 1", [alertId.data])
+    ]);
+
+    const timeline = [
+      {
+        type: "alert_created",
+        actor: "fraudpulse-worker",
+        title: `${alert.severity} alert created`,
+        created_at: alert.created_at
+      },
+      ...caseNotes.rows.map(note => ({
+        type: "case_note",
+        actor: note.author,
+        title: "Case note added",
+        detail: note.note,
+        created_at: note.created_at
+      })),
+      ...reviews.rows.map(review => ({
+        type: "review_decision",
+        actor: review.analyst,
+        title: String(review.decision).replaceAll("_", " "),
+        detail: review.notes,
+        created_at: review.created_at
+      })),
+      ...auditTrail.rows.map(entry => ({
+        type: "audit",
+        actor: entry.actor,
+        title: String(entry.action).replaceAll("_", " "),
+        detail: entry.payload,
+        created_at: entry.created_at
+      }))
+    ].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+
+    const highRiskEntities = entityRisk.rows.filter(row => Number(row.risk_score) >= 70);
+    const openMerchantAlerts = merchantAlerts.rows.filter(row => row.status === "pending").length;
+    const crossEntityMatches =
+      (deviceTransactions.rowCount ?? 0) + (ipTransactions.rowCount ?? 0) + (cardTransactions.rowCount ?? 0);
+    const recommendedActions = [
+      highRiskEntities.length > 0 ? "Review high-memory entities linked to this case" : "Validate entity memory after analyst decision",
+      crossEntityMatches > 0 ? "Compare related device, IP, and card transactions" : "No shared device, IP, or card transactions in recent evidence",
+      openMerchantAlerts > 1 ? "Prioritize merchant-level pattern review" : "Check merchant risk against the individual transaction context",
+      Number(alert.score) >= 90 ? "Escalate before customer contact because the score is critical" : "Complete analyst review and preserve supporting notes"
+    ];
+
+    const bundle = {
+      alert: {
+        id: alert.id,
+        severity: alert.severity,
+        score: alert.score,
+        confidence: alert.confidence,
+        status: alert.status,
+        assigned_to: alert.assigned_to,
+        priority: alert.priority,
+        due_at: alert.due_at,
+        reasons
+      },
+      transaction,
+      user,
+      merchant,
+      scoreDetail: alert.score_detail,
+      featureSnapshot: alert.feature_snapshot,
+      summary: {
+        reasonCount: reasons.length,
+        highRiskEntityCount: highRiskEntities.length,
+        relatedTransactionCount: crossEntityMatches,
+        openMerchantAlerts,
+        latestSnapshotAt: latestSnapshot.rows[0]?.created_at ?? null
+      },
+      entityRisk: entityRisk.rows,
+      relatedActivity: {
+        userTransactions: userTransactions.rows,
+        cardTransactions: cardTransactions.rows,
+        deviceTransactions: deviceTransactions.rows,
+        ipTransactions: ipTransactions.rows,
+        merchantAlerts: merchantAlerts.rows
+      },
+      recommendedActions,
+      timeline,
+      latestSnapshot: latestSnapshot.rows[0] ?? null
+    };
+
+    res.json(bundle);
+  });
+
+  app.post("/cases/:alertId/evidence-snapshots", security.requireAuth("analyst"), async (req, res, next) => {
+    try {
+      const alertId = z.string().uuid().safeParse(req.params.alertId);
+      if (!alertId.success) return res.status(400).json({ error: "invalid_alert_id" });
+      const body = z.object({
+        actor: z.string().min(2).default("demo-investigator"),
+        bundle: z.record(z.unknown())
+      }).parse(req.body ?? {});
+      const alert = await query("SELECT id FROM fraud_alerts WHERE id = $1", [alertId.data]);
+      if (!alert.rowCount) return res.status(404).json({ error: "alert_not_found" });
+      const snapshot = await query(
+        "INSERT INTO case_evidence_snapshots (alert_id, created_by, bundle) VALUES ($1,$2,$3) RETURNING *",
+        [alertId.data, body.actor, body.bundle]
+      );
+      await query(
+        "INSERT INTO audit_logs (actor, action, entity_type, entity_id, payload) VALUES ($1,'case_evidence_snapshot_created','fraud_alert',$2,$3)",
+        [body.actor, alertId.data, { snapshotId: snapshot.rows[0].id }]
+      );
+      io.emit("case_evidence_snapshot_created", { alertId: alertId.data, snapshotId: snapshot.rows[0].id });
+      res.status(201).json(snapshot.rows[0]);
+    } catch (error) {
+      next(error);
+    }
+  });
+
   app.post("/alerts/:id/assign", security.requireAuth("analyst"), async (req, res, next) => {
     try {
       const body = z.object({

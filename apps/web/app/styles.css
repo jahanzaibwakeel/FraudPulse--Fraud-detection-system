@@ -74,6 +74,13 @@ td { color: #d6e6ea; overflow: hidden; text-overflow: ellipsis; }
 .alertRow span { color: var(--muted); }
 .alertRow b { color: var(--red); font-size: 22px; }
 .detailGrid { display: grid; grid-template-columns: 1fr 360px; gap: 12px; }
+.caseLayout { display: grid; grid-template-columns: minmax(520px, 1fr) 390px; gap: 12px; align-items: start; }
+.evidenceGrid { display: grid; grid-template-columns: repeat(3, minmax(150px, 1fr)); gap: 8px; padding: 12px; }
+.evidenceGrid div { border: 1px solid var(--line); background: #091316; padding: 11px; display: grid; gap: 5px; min-height: 82px; }
+.evidenceGrid span { color: var(--muted); font-size: 11px; text-transform: uppercase; font-weight: 800; }
+.evidenceGrid strong { color: #f0fbfd; overflow-wrap: anywhere; }
+.evidenceGrid small { color: var(--muted); line-height: 1.35; overflow-wrap: anywhere; }
+.reasonStack { border-top: 1px solid var(--line); }
 .reason { padding: 12px; border-top: 1px solid var(--line); display: grid; gap: 6px; }
 .reason p { margin: 0; color: #dcecee; }
 .reason code { color: var(--cyan); }
@@ -133,6 +140,6 @@ textarea, input, select { width: 100%; background: #091316; border: 1px solid va
   .rail { position: relative; height: auto; display: block; }
   .rail nav { display: flex; overflow-x: auto; }
   .brand small { display: none; }
-  .metricGrid, .opsGrid, .opsGrid.lower, .detailGrid, .ringLayout, .filterBar, .reportSummary { grid-template-columns: 1fr; }
+  .metricGrid, .opsGrid, .opsGrid.lower, .detailGrid, .caseLayout, .ringLayout, .filterBar, .reportSummary, .evidenceGrid { grid-template-columns: 1fr; }
   .screen { padding: 16px; }
 }
