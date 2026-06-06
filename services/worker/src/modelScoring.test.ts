@@ -30,5 +30,7 @@ describe("scoreHybridModel", () => {
 
     expect(high.modelProbability).toBeGreaterThan(low.modelProbability);
     expect(high.blendedScore).toBeGreaterThan(70);
+    expect(high.featureContributions[0].feature).toBeTruthy();
+    expect(high.featureContributions.some(item => item.direction === "raises_risk")).toBe(true);
   });
 });

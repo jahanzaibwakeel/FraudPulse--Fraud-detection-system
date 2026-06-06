@@ -132,6 +132,33 @@ npm run train:model
 
 Or use the Model Metrics dashboard button to train from the running Docker app.
 
+## Model Explainability
+
+Round 7 adds trained-model feature contribution explanations. Each ML-driven alert records the model kind, probability, linear score, rule/blended score, and the top feature contributions that raised or lowered risk. Alert details show these contributions for case review, and the model dashboard aggregates the strongest feature drivers from recent alerts.
+
+## Round Roadmap
+
+Completed:
+
+- Round 1: Fraud ring detection and graph view
+- Round 2: Feature store and rule impact preview
+- Round 3: Analyst operations workflows
+- Round 4: Hybrid ML scoring, drift monitoring, and recalibration controls
+- Round 5: Production hardening with auth, security, reports, and E2E tests
+- Round 6: Real trained local fraud model
+- Round 7: Model explainability with per-feature trained-model contributions
+
+Remaining:
+
+- Round 8: Model registry with champion/challenger promotion and rollback
+- Round 9: Entity risk memory for users, cards, devices, IPs, and merchants
+- Round 10: Case investigation workspace with evidence bundles
+- Round 11: Data quality checks and drift alerting
+- Round 12: Advanced simulation lab for configurable fraud campaigns
+- Round 13: Real model benchmarking across multiple local algorithms
+- Round 14: Security hardening V2 with login, sessions, and key rotation
+- Round 15: Deployment polish with CI, screenshots, and demo walkthrough
+
 ## Documentation
 
 - API documentation: [docs/api.md](docs/api.md)

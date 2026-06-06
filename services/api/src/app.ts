@@ -703,7 +703,28 @@ export const createApp = () => {
        ORDER BY abs(COALESCE(fs.ml_score, fs.score) - COALESCE(fs.rule_score, fs.score)) DESC NULLS LAST, fs.created_at DESC
        LIMIT 25`
     );
-    res.json({ activeModel: model.rows[0] ?? null, ...summary.rows[0], topDisagreements: recent.rows });
+    const contributions = await query(
+      `SELECT
+        item->>'feature' AS feature,
+        item->>'direction' AS direction,
+        count(*) AS count,
+        COALESCE(avg((item->>'contribution')::numeric), 0) AS avg_contribution,
+        COALESCE(avg(abs((item->>'contribution')::numeric)), 0) AS avg_abs_contribution
+       FROM fraud_scores fs
+       CROSS JOIN LATERAL jsonb_array_elements(fs.reasons) reason
+       CROSS JOIN LATERAL jsonb_array_elements(COALESCE(reason->'evidence'->'topContributions', '[]'::jsonb)) item
+       WHERE fs.created_at >= now() - interval '24 hours'
+         AND reason->>'rule' = 'hybrid_ml_model'
+       GROUP BY item->>'feature', item->>'direction'
+       ORDER BY avg_abs_contribution DESC
+       LIMIT 12`
+    );
+    res.json({
+      activeModel: model.rows[0] ?? null,
+      ...summary.rows[0],
+      topDisagreements: recent.rows,
+      topModelContributions: contributions.rows
+    });
   });
 
   app.get("/models/drift", async (_req, res) => {

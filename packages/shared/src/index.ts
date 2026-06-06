@@ -33,7 +33,7 @@ export interface ScoreReason {
   scoreImpact: number;
   confidence: number;
   description: string;
-  evidence: Record<string, string | number | boolean | null>;
+  evidence: Record<string, unknown>;
 }
 
 export interface FraudScoreResult {

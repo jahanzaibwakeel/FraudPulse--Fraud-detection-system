@@ -77,6 +77,14 @@ td { color: #d6e6ea; overflow: hidden; text-overflow: ellipsis; }
 .reason { padding: 12px; border-top: 1px solid var(--line); display: grid; gap: 6px; }
 .reason p { margin: 0; color: #dcecee; }
 .reason code { color: var(--cyan); }
+.contributionStack { display: grid; gap: 7px; margin-top: 4px; }
+.contributionBar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 10px; border: 1px solid var(--line); background: #091316; }
+.contributionBar strong { display: block; font-size: 13px; }
+.contributionBar small { color: var(--muted); }
+.contributionBar span { font-weight: 800; color: var(--cyan); }
+.contributionBar.raises_risk { border-left: 3px solid var(--red); }
+.contributionBar.lowers_risk { border-left: 3px solid var(--green); }
+.contributionBar.neutral { border-left: 3px solid var(--blue); }
 .formRow { display: grid; gap: 8px; padding: 14px; }
 textarea, input, select { width: 100%; background: #091316; border: 1px solid var(--line); color: var(--text); padding: 10px; }
 .primary { border: 1px solid #2f5965; background: #12333a; color: var(--text); padding: 10px 12px; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 7px; }

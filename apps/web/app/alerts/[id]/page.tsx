@@ -23,6 +23,18 @@ type AlertDetail = {
   audit_trail: Array<{ id: string; actor: string; action: string; created_at: string; payload: Record<string, unknown> }>;
 };
 
+type ModelContribution = {
+  feature: string;
+  rawValue: number;
+  normalizedValue: number;
+  coefficient: number;
+  contribution: number;
+  direction: string;
+};
+
+const isContributionList = (value: unknown): value is ModelContribution[] =>
+  Array.isArray(value) && value.every(item => typeof item === "object" && item !== null && "feature" in item && "contribution" in item);
+
 export default function AlertDetailPage({ params }: { params: { id: string } }) {
   const [alert, setAlert] = useState<AlertDetail | null>(null);
   const [notes, setNotes] = useState("");
@@ -70,7 +82,21 @@ export default function AlertDetailPage({ params }: { params: { id: string } }) 
             <div className="reason" key={reason.rule}>
               <code>{reason.rule} +{reason.scoreImpact}</code>
               <p>{reason.description}</p>
-              <small>{JSON.stringify(reason.evidence)}</small>
+              {isContributionList(reason.evidence.topContributions) ? (
+                <div className="contributionStack">
+                  {reason.evidence.topContributions.map(item => (
+                    <div className={`contributionBar ${item.direction}`} key={item.feature}>
+                      <div>
+                        <strong>{item.feature}</strong>
+                        <small>raw {Number(item.rawValue).toFixed(2)} / coeff {Number(item.coefficient).toFixed(3)}</small>
+                      </div>
+                      <span>{item.contribution > 0 ? "+" : ""}{Number(item.contribution).toFixed(3)}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <small>{JSON.stringify(reason.evidence)}</small>
+              )}
             </div>
           ))}
         </div>

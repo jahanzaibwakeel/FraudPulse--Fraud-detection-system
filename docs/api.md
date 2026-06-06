@@ -105,7 +105,7 @@ Case note:
 - `GET /features/overview` returns feature-store aggregates and top anomalies.
 - `GET /features/transactions/:id` returns the feature snapshot for one transaction.
 - `GET /metrics/model` returns precision, recall, F1, confusion matrix, FPR, and TPR.
-- `GET /models/hybrid` returns active model settings, rule/ML/blended score summaries, and disagreements.
+- `GET /models/hybrid` returns active model settings, rule/ML/blended score summaries, disagreements, and aggregated trained-model feature drivers.
 - `GET /models/drift` returns current-vs-baseline feature drift.
 - `POST /models/recalibrate` creates a new active local model version.
 - `POST /models/train` trains and activates a local logistic regression model from feature-store history. Requires admin.

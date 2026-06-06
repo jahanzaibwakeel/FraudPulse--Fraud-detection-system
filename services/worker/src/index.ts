@@ -115,12 +115,17 @@ const worker = new Worker(
         rule: "hybrid_ml_model",
         scoreImpact: Number((hybrid.mlScore * (1 - hybrid.blendRuleWeight)).toFixed(2)),
         confidence: hybrid.modelProbability,
-        description: "Hybrid local model detected a high fraud probability from feature interactions.",
+        description: activeModel?.parameters?.modelKind === "trained_logistic_regression"
+          ? "Trained local model detected fraud risk from feature contributions."
+          : "Hybrid local model detected a high fraud probability from feature interactions.",
         evidence: {
+          modelKind: activeModel?.parameters?.modelKind ?? "hand_tuned_logistic",
+          linearScore: hybrid.linearScore,
           modelProbability: hybrid.modelProbability,
           mlScore: hybrid.mlScore,
           ruleScore,
-          blendedScore: hybrid.blendedScore
+          blendedScore: hybrid.blendedScore,
+          topContributions: hybrid.featureContributions.slice(0, 5)
         }
       });
     }

@@ -16,4 +16,5 @@ test("performance page exposes local model training", async ({ page }) => {
   await page.goto("/performance");
   await expect(page.getByRole("heading", { name: "Model and Rule Performance" })).toBeVisible();
   await expect(page.getByRole("button", { name: /Train Local Model/i })).toBeVisible();
+  await expect(page.getByText("Trained Model Feature Drivers")).toBeVisible();
 });

@@ -46,6 +46,13 @@ type HybridSummary = {
     full_name: string;
     merchant_name: string;
   }>;
+  topModelContributions: Array<{
+    feature: string;
+    direction: string;
+    count: string;
+    avg_contribution: string;
+    avg_abs_contribution: string;
+  }>;
 };
 
 type DriftSummary = {
@@ -174,6 +181,24 @@ export default function PerformancePage() {
                 <td>{Number(row.rule_score ?? 0).toFixed(1)}</td>
                 <td>{Number(row.ml_score ?? 0).toFixed(1)}<small>p={Number(row.model_probability ?? 0).toFixed(3)}</small></td>
                 <td>{Number(row.blended_score ?? 0).toFixed(1)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </section>
+
+      <section className="panel">
+        <div className="panelHeader"><h2>Trained Model Feature Drivers</h2><strong>last 24h alerts</strong></div>
+        <table>
+          <thead><tr><th>Feature</th><th>Direction</th><th>Avg Contribution</th><th>Avg Strength</th><th>Count</th></tr></thead>
+          <tbody>
+            {hybrid?.topModelContributions?.map(item => (
+              <tr key={`${item.feature}-${item.direction}`}>
+                <td>{item.feature}</td>
+                <td>{item.direction.replaceAll("_", " ")}</td>
+                <td>{Number(item.avg_contribution).toFixed(3)}</td>
+                <td>{Number(item.avg_abs_contribution).toFixed(3)}</td>
+                <td>{item.count}</td>
               </tr>
             ))}
           </tbody>

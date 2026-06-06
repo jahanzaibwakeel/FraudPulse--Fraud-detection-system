@@ -36,6 +36,15 @@ export interface HybridScore {
   mlScore: number;
   blendedScore: number;
   blendRuleWeight: number;
+  linearScore: number;
+  featureContributions: Array<{
+    feature: string;
+    rawValue: number;
+    normalizedValue: number;
+    coefficient: number;
+    contribution: number;
+    direction: "raises_risk" | "lowers_risk" | "neutral";
+  }>;
 }
 
 const defaults: Record<"bias" | "velocity5m" | "velocity1h" | "amountZscore" | "geoKmh" | "merchantRisk" | "newDevice" | "userTx30d", number> = {
@@ -71,19 +80,39 @@ export const scoreHybridModel = (
   const trainedFeatures = parameters.modelKind === "trained_logistic_regression" && parameters.featureNames?.length
     ? parameters.featureNames
     : null;
-  const linear = trainedFeatures
-    ? trainedFeatures.reduce((sum, feature) => {
+  const featureContributions = trainedFeatures
+    ? trainedFeatures.map(feature => {
       const stats = parameters.normalization?.[feature] ?? { mean: 0, scale: 1 };
-      const normalized = (rawFeatureValue(features, feature) - stats.mean) / Math.max(stats.scale, 0.0001);
-      return sum + (parameters.coefficients?.[feature] ?? 0) * normalized;
-    }, parameters.coefficients?.bias ?? 0)
-    : coefficients.bias +
-      coefficients.velocity5m * Math.min(features.velocity5m, 100) +
-      coefficients.amountZscore * Math.max(features.amountZscore, 0) +
-      coefficients.geoKmh * Math.min(features.geoKmh, 2500) +
-      coefficients.merchantRisk * features.merchantRisk +
-      coefficients.newDevice * (features.deviceSeen ? 0 : 1) +
-      coefficients.userTx30d * Math.min(features.userTx30d, 150);
+      const rawValue = rawFeatureValue(features, feature);
+      const normalizedValue = (rawValue - stats.mean) / Math.max(stats.scale, 0.0001);
+      const coefficient = parameters.coefficients?.[feature] ?? 0;
+      const contribution = coefficient * normalizedValue;
+      return {
+        feature,
+        rawValue: Number(rawValue.toFixed(4)),
+        normalizedValue: Number(normalizedValue.toFixed(4)),
+        coefficient: Number(coefficient.toFixed(6)),
+        contribution: Number(contribution.toFixed(6)),
+        direction: contribution > 0.0001 ? "raises_risk" as const : contribution < -0.0001 ? "lowers_risk" as const : "neutral" as const
+      };
+    })
+    : [
+      { feature: "velocity5m", rawValue: Math.min(features.velocity5m, 100), normalizedValue: Math.min(features.velocity5m, 100), coefficient: coefficients.velocity5m, contribution: coefficients.velocity5m * Math.min(features.velocity5m, 100) },
+      { feature: "amountZscore", rawValue: Math.max(features.amountZscore, 0), normalizedValue: Math.max(features.amountZscore, 0), coefficient: coefficients.amountZscore, contribution: coefficients.amountZscore * Math.max(features.amountZscore, 0) },
+      { feature: "geoKmh", rawValue: Math.min(features.geoKmh, 2500), normalizedValue: Math.min(features.geoKmh, 2500), coefficient: coefficients.geoKmh, contribution: coefficients.geoKmh * Math.min(features.geoKmh, 2500) },
+      { feature: "merchantRisk", rawValue: features.merchantRisk, normalizedValue: features.merchantRisk, coefficient: coefficients.merchantRisk, contribution: coefficients.merchantRisk * features.merchantRisk },
+      { feature: "newDevice", rawValue: features.deviceSeen ? 0 : 1, normalizedValue: features.deviceSeen ? 0 : 1, coefficient: coefficients.newDevice, contribution: coefficients.newDevice * (features.deviceSeen ? 0 : 1) },
+      { feature: "userTx30d", rawValue: Math.min(features.userTx30d, 150), normalizedValue: Math.min(features.userTx30d, 150), coefficient: coefficients.userTx30d, contribution: coefficients.userTx30d * Math.min(features.userTx30d, 150) }
+    ].map(item => ({
+      ...item,
+      rawValue: Number(item.rawValue.toFixed(4)),
+      normalizedValue: Number(item.normalizedValue.toFixed(4)),
+      coefficient: Number(item.coefficient.toFixed(6)),
+      contribution: Number(item.contribution.toFixed(6)),
+      direction: item.contribution > 0.0001 ? "raises_risk" as const : item.contribution < -0.0001 ? "lowers_risk" as const : "neutral" as const
+    }));
+  const linear = Number(((trainedFeatures ? parameters.coefficients?.bias ?? 0 : coefficients.bias) +
+    featureContributions.reduce((sum, item) => sum + item.contribution, 0)).toFixed(6));
   const modelProbability = sigmoid(linear);
   const mlScore = clamp(modelProbability * 100, 0, 99);
   const blendRuleWeight = clamp(parameters.blendRuleWeight ?? 0.62, 0.05, 0.95);
@@ -93,6 +122,8 @@ export const scoreHybridModel = (
     modelProbability: Number(modelProbability.toFixed(5)),
     mlScore: Number(mlScore.toFixed(2)),
     blendedScore: Number(blendedScore.toFixed(2)),
-    blendRuleWeight
+    blendRuleWeight,
+    linearScore: linear,
+    featureContributions: featureContributions.sort((a, b) => Math.abs(b.contribution) - Math.abs(a.contribution))
   };
 };
