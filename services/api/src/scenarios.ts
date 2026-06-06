@@ -1,12 +1,22 @@
 import type { TransactionInput } from "@fraudpulse/shared";
 
-export type ScenarioId = "card_testing_burst" | "impossible_travel" | "account_takeover";
+export type ScenarioId = "card_testing_burst" | "impossible_travel" | "account_takeover" | "merchant_collusion";
 
 export interface ScenarioDefinition {
   id: ScenarioId;
   name: string;
   description: string;
   expectedSignals: string[];
+  defaultCount: number;
+}
+
+export interface ScenarioBuildOptions {
+  transactionCount?: number;
+  amountMultiplier?: number;
+  cadenceSeconds?: number;
+  deviceStrategy?: "rotating" | "shared" | "trusted";
+  ipStrategy?: "rotating" | "shared" | "residential";
+  fraudRate?: number;
 }
 
 export interface DemoAccount extends Record<string, unknown> {
@@ -31,19 +41,29 @@ export const scenarios: ScenarioDefinition[] = [
     id: "card_testing_burst",
     name: "Card Testing Burst",
     description: "A compromised card is tested with rapid ecommerce purchases across risky merchants.",
-    expectedSignals: ["velocity_5m", "merchant_risk", "new_device"]
+    expectedSignals: ["velocity_5m", "merchant_risk", "new_device"],
+    defaultCount: 14
   },
   {
     id: "impossible_travel",
     name: "Impossible Travel",
     description: "A normal local purchase is followed minutes later by a high-risk overseas transaction.",
-    expectedSignals: ["geo_impossible", "amount_zscore", "merchant_risk"]
+    expectedSignals: ["geo_impossible", "amount_zscore", "merchant_risk"],
+    defaultCount: 2
   },
   {
     id: "account_takeover",
     name: "Account Takeover",
     description: "A new device makes high-value crypto and ATM transactions outside the customer baseline.",
-    expectedSignals: ["amount_zscore", "new_device", "merchant_risk", "velocity_5m"]
+    expectedSignals: ["amount_zscore", "new_device", "merchant_risk", "velocity_5m"],
+    defaultCount: 7
+  },
+  {
+    id: "merchant_collusion",
+    name: "Merchant Collusion",
+    description: "Repeated high-value transactions concentrate around one risky merchant with a shared device and IP.",
+    expectedSignals: ["merchant_risk", "velocity_5m", "amount_zscore", "ring_shared_entity"],
+    defaultCount: 10
   }
 ];
 
@@ -55,11 +75,50 @@ const merchantByCategory = (merchants: DemoMerchant[], category: string) =>
 
 const ip = (index: number) => `45.91.${20 + index}.${100 + index}`;
 
+const applyLabOptions = (
+  transactions: TransactionInput[],
+  account: DemoAccount,
+  options: ScenarioBuildOptions,
+  startedAt: Date
+) => {
+  const count = Math.min(Math.max(Math.round(options.transactionCount ?? transactions.length), 1), 200);
+  const amountMultiplier = Math.min(Math.max(Number(options.amountMultiplier ?? 1), 0.1), 12);
+  const cadenceSeconds = Math.min(Math.max(Math.round(options.cadenceSeconds ?? 30), 5), 3600);
+  const deviceStrategy = options.deviceStrategy ?? "rotating";
+  const ipStrategy = options.ipStrategy ?? "rotating";
+  const fraudRate = Math.min(Math.max(Number(options.fraudRate ?? 1), 0), 1);
+  const fraudCount = Math.round(count * fraudRate);
+  return Array.from({ length: count }, (_, index) => {
+    const template = transactions[index % transactions.length];
+    const deviceFingerprint =
+      deviceStrategy === "trusted"
+        ? `trusted-${account.user_id.slice(0, 8)}`
+        : deviceStrategy === "shared"
+          ? `lab-shared-device-${startedAt.getTime()}`
+          : `lab-device-${startedAt.getTime()}-${index}`;
+    const ipAddress =
+      ipStrategy === "residential"
+        ? "73.44.21.10"
+        : ipStrategy === "shared"
+          ? "45.250.77.10"
+          : ip(index);
+    return {
+      ...template,
+      amount: Number((template.amount * amountMultiplier).toFixed(2)),
+      occurredAt: new Date(startedAt.getTime() + index * cadenceSeconds * 1000).toISOString(),
+      deviceFingerprint,
+      ipAddress,
+      isFraudGroundTruth: index < fraudCount
+    };
+  });
+};
+
 export const buildScenarioTransactions = (
   scenarioId: ScenarioId,
   account: DemoAccount,
   merchants: DemoMerchant[],
-  startedAt = new Date()
+  startedAt = new Date(),
+  options: ScenarioBuildOptions = {}
 ): TransactionInput[] => {
   const baseline = Number(account.baseline_daily_amount);
   const homeLatitude = Number(account.home_latitude);
@@ -76,7 +135,7 @@ export const buildScenarioTransactions = (
   };
 
   if (scenarioId === "impossible_travel") {
-    return [
+    const transactions: TransactionInput[] = [
       {
         ...base,
         merchantId: grocery.id,
@@ -102,10 +161,11 @@ export const buildScenarioTransactions = (
         isFraudGroundTruth: true
       }
     ];
+    return Object.keys(options).length ? applyLabOptions(transactions, account, options, startedAt) : transactions;
   }
 
   if (scenarioId === "account_takeover") {
-    return Array.from({ length: 7 }, (_, index) => {
+    const transactions: TransactionInput[] = Array.from({ length: 7 }, (_, index) => {
       const merchant = index % 3 === 0 ? atm : crypto;
       return {
         ...base,
@@ -120,9 +180,26 @@ export const buildScenarioTransactions = (
         isFraudGroundTruth: true
       };
     });
+    return Object.keys(options).length ? applyLabOptions(transactions, account, options, startedAt) : transactions;
   }
 
-  return Array.from({ length: 14 }, (_, index) => ({
+  if (scenarioId === "merchant_collusion") {
+    const transactions: TransactionInput[] = Array.from({ length: 10 }, (_, index) => ({
+      ...base,
+      merchantId: highRisk.id,
+      amount: Number((baseline * (1.8 + index * 0.22)).toFixed(2)),
+      occurredAt: new Date(startedAt.getTime() + index * 24_000).toISOString(),
+      latitude: Number(highRisk.latitude),
+      longitude: Number(highRisk.longitude),
+      channel: index % 4 === 0 ? "wallet" : "ecommerce",
+      deviceFingerprint: `collusion-device-${startedAt.getTime()}`,
+      ipAddress: "45.250.77.10",
+      isFraudGroundTruth: true
+    }));
+    return Object.keys(options).length ? applyLabOptions(transactions, account, options, startedAt) : transactions;
+  }
+
+  const transactions: TransactionInput[] = Array.from({ length: 14 }, (_, index) => ({
     ...base,
     merchantId: index % 2 === 0 ? highRisk.id : crypto.id,
     amount: Number((12 + index * 7.35).toFixed(2)),
@@ -134,4 +211,5 @@ export const buildScenarioTransactions = (
     ipAddress: ip(index),
     isFraudGroundTruth: true
   }));
+  return Object.keys(options).length ? applyLabOptions(transactions, account, options, startedAt) : transactions;
 };

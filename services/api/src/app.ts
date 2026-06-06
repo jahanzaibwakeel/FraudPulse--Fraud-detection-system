@@ -12,7 +12,7 @@ import { logger } from "./logger.js";
 import { alertCount, registry, reviewDecisions, transactionThroughput } from "./metrics.js";
 import { scoringQueue } from "./queue.js";
 import { buildFraudRingGraph, type SuspiciousTransactionRow } from "./ringGraph.js";
-import { buildScenarioTransactions, scenarios, type DemoAccount, type DemoMerchant } from "./scenarios.js";
+import { buildScenarioTransactions, scenarios, type DemoAccount, type DemoMerchant, type ScenarioBuildOptions } from "./scenarios.js";
 import { createSecurity } from "./security.js";
 
 const csvCell = (value: unknown) => {
@@ -1733,39 +1733,138 @@ export const createApp = () => {
     res.json(scenarios);
   });
 
-  app.post("/simulator/scenarios/:id/run", security.requireAuth("admin"), async (req, res, next) => {
+  const scenarioIdSchema = z.enum(["card_testing_burst", "impossible_travel", "account_takeover", "merchant_collusion"]);
+  const simulationRunSchema = z.object({
+    scenarioId: scenarioIdSchema,
+    userId: z.string().uuid().optional(),
+    actor: z.string().min(2).default("demo-operator"),
+    transactionCount: z.number().int().min(1).max(200).optional(),
+    amountMultiplier: z.number().min(0.1).max(12).optional(),
+    cadenceSeconds: z.number().int().min(5).max(3600).optional(),
+    deviceStrategy: z.enum(["rotating", "shared", "trusted"]).optional(),
+    ipStrategy: z.enum(["rotating", "shared", "residential"]).optional(),
+    fraudRate: z.number().min(0).max(1).optional()
+  });
+
+  const loadSimulationInputs = async (userId?: string) => {
+    const accountResult = await query<DemoAccount & { full_name?: string; last4?: string }>(
+      `SELECT u.id AS user_id, c.id AS card_id, u.full_name, c.last4, u.home_latitude, u.home_longitude, u.baseline_daily_amount
+       FROM users u
+       JOIN cards c ON c.user_id = u.id
+       WHERE ($1::uuid IS NULL OR u.id = $1)
+       ORDER BY u.created_at
+       LIMIT 1`,
+      [userId ?? null]
+    );
+    const merchantResult = await query<DemoMerchant>(
+      "SELECT id, name, category, risk_score, latitude, longitude FROM merchants ORDER BY risk_score DESC"
+    );
+    if (!accountResult.rowCount) throw new Error("demo_account_not_found");
+    if (!merchantResult.rowCount) throw new Error("demo_merchants_not_found");
+    return { account: accountResult.rows[0], merchants: merchantResult.rows };
+  };
+
+  const runSimulationCampaign = async (
+    body: z.infer<typeof simulationRunSchema>,
+    mode: "preset" | "lab"
+  ) => {
+    const { account, merchants } = await loadSimulationInputs(body.userId);
+    const scenario = scenarios.find(item => item.id === body.scenarioId);
+    const options: ScenarioBuildOptions = mode === "lab" ? {
+      transactionCount: body.transactionCount,
+      amountMultiplier: body.amountMultiplier,
+      cadenceSeconds: body.cadenceSeconds,
+      deviceStrategy: body.deviceStrategy,
+      ipStrategy: body.ipStrategy,
+      fraudRate: body.fraudRate
+    } : {};
+    const parameters = {
+      mode,
+      userId: account.user_id,
+      cardId: account.card_id,
+      transactionCount: options.transactionCount ?? scenario?.defaultCount,
+      amountMultiplier: options.amountMultiplier ?? 1,
+      cadenceSeconds: options.cadenceSeconds ?? 30,
+      deviceStrategy: options.deviceStrategy ?? "scenario_default",
+      ipStrategy: options.ipStrategy ?? "scenario_default",
+      fraudRate: options.fraudRate ?? "scenario_default"
+    };
+    const run = await query<{ id: string }>(
+      `INSERT INTO simulation_runs (scenario_id, actor, parameters, expected_signals)
+       VALUES ($1,$2,$3,$4)
+       RETURNING id`,
+      [body.scenarioId, body.actor, JSON.stringify(parameters), JSON.stringify(scenario?.expectedSignals ?? [])]
+    );
+    const runId = run.rows[0].id;
     try {
-      const scenarioId = z.enum(["card_testing_burst", "impossible_travel", "account_takeover"]).parse(req.params.id);
-      const body = z.object({
-        userId: z.string().uuid().optional(),
-        actor: z.string().min(2).default("demo-operator")
-      }).parse(req.body ?? {});
-      const accountResult = await query<DemoAccount>(
-        `SELECT u.id AS user_id, c.id AS card_id, u.home_latitude, u.home_longitude, u.baseline_daily_amount
-         FROM users u
-         JOIN cards c ON c.user_id = u.id
-         WHERE ($1::uuid IS NULL OR u.id = $1)
-         ORDER BY u.created_at
-         LIMIT 1`,
-        [body.userId ?? null]
-      );
-      const merchantResult = await query<DemoMerchant>(
-        "SELECT id, name, category, risk_score, latitude, longitude FROM merchants ORDER BY risk_score DESC"
-      );
-      if (!accountResult.rowCount) return res.status(404).json({ error: "demo_account_not_found" });
-      if (!merchantResult.rowCount) return res.status(404).json({ error: "demo_merchants_not_found" });
-      const transactions = buildScenarioTransactions(scenarioId, accountResult.rows[0], merchantResult.rows);
+      const transactions = buildScenarioTransactions(body.scenarioId, account, merchants, new Date(), options);
       const ids: string[] = [];
       for (const transaction of transactions) {
-        ids.push(await createTransaction(transaction, `scenario:${scenarioId}`));
+        ids.push(await createTransaction(transaction, `${mode}:${body.scenarioId}:${runId}`));
       }
       await query(
-        "INSERT INTO audit_logs (actor, action, entity_type, entity_id, payload) VALUES ($1,'scenario_replay_started','scenario',$2,$3)",
-        [body.actor, scenarioId, { scenarioId, transactionCount: ids.length, transactionIds: ids }]
+        "UPDATE simulation_runs SET status = 'completed', transaction_ids = $1::uuid[], completed_at = now() WHERE id = $2",
+        [ids, runId]
       );
-      io.emit("scenario_replay_started", { scenarioId, transactionCount: ids.length });
-      res.status(202).json({ scenarioId, transactionCount: ids.length, transactionIds: ids });
+      await query(
+        "INSERT INTO audit_logs (actor, action, entity_type, entity_id, payload) VALUES ($1,'scenario_replay_started','scenario',$2,$3)",
+        [body.actor, body.scenarioId, JSON.stringify({ scenarioId: body.scenarioId, runId, mode, transactionCount: ids.length, transactionIds: ids })]
+      );
+      io.emit("scenario_replay_started", { scenarioId: body.scenarioId, runId, mode, transactionCount: ids.length });
+      return { runId, scenarioId: body.scenarioId, transactionCount: ids.length, transactionIds: ids };
     } catch (error) {
+      await query("UPDATE simulation_runs SET status = 'failed', error = $1, completed_at = now() WHERE id = $2", [
+        error instanceof Error ? error.message : "simulation_failed",
+        runId
+      ]);
+      throw error;
+    }
+  };
+
+  app.get("/simulation/lab", async (_req, res) => {
+    const [accounts, recentRuns] = await Promise.all([
+      query(
+        `SELECT u.id AS user_id, c.id AS card_id, u.full_name, c.last4, u.risk_tier, u.baseline_daily_amount
+         FROM users u
+         JOIN cards c ON c.user_id = u.id
+         ORDER BY u.created_at
+         LIMIT 20`
+      ),
+      query("SELECT * FROM simulation_runs ORDER BY started_at DESC LIMIT 20")
+    ]);
+    res.json({ scenarios, accounts: accounts.rows, recentRuns: recentRuns.rows });
+  });
+
+  app.get("/simulation/runs", async (req, res) => {
+    const limit = Math.min(Number(req.query.limit ?? 50), 200);
+    const result = await query("SELECT * FROM simulation_runs ORDER BY started_at DESC LIMIT $1", [limit]);
+    res.json(result.rows);
+  });
+
+  app.post("/simulation/runs", security.requireAuth("admin"), async (req, res, next) => {
+    try {
+      const body = simulationRunSchema.parse(req.body ?? {});
+      const result = await runSimulationCampaign(body, "lab");
+      res.status(202).json(result);
+    } catch (error) {
+      if (error instanceof Error && error.message === "demo_account_not_found") return res.status(404).json({ error: "demo_account_not_found" });
+      if (error instanceof Error && error.message === "demo_merchants_not_found") return res.status(404).json({ error: "demo_merchants_not_found" });
+      next(error);
+    }
+  });
+
+  app.post("/simulator/scenarios/:id/run", security.requireAuth("admin"), async (req, res, next) => {
+    try {
+      const scenarioId = scenarioIdSchema.parse(req.params.id);
+      const body = simulationRunSchema.parse({
+        ...req.body,
+        scenarioId
+      });
+      const result = await runSimulationCampaign(body, "preset");
+      res.status(202).json(result);
+    } catch (error) {
+      if (error instanceof Error && error.message === "demo_account_not_found") return res.status(404).json({ error: "demo_account_not_found" });
+      if (error instanceof Error && error.message === "demo_merchants_not_found") return res.status(404).json({ error: "demo_merchants_not_found" });
       next(error);
     }
   });

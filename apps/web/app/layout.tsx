@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { Activity, Bell, BriefcaseBusiness, Database, Gauge, LockKeyhole, Network, RadioTower, ShieldAlert, ShieldCheck, SlidersHorizontal, Target, Trophy } from "lucide-react";
+import { Activity, Bell, BriefcaseBusiness, Database, FlaskConical, Gauge, LockKeyhole, Network, RadioTower, ShieldAlert, ShieldCheck, SlidersHorizontal, Target, Trophy } from "lucide-react";
 import Link from "next/link";
 import "./styles.css";
 
@@ -12,6 +12,7 @@ const nav = [
   { href: "/", label: "Live Monitor", icon: RadioTower },
   { href: "/alerts", label: "Alert Center", icon: Bell },
   { href: "/operations", label: "Operations", icon: BriefcaseBusiness },
+  { href: "/simulation", label: "Simulation Lab", icon: FlaskConical },
   { href: "/rings", label: "Ring Graph", icon: Network },
   { href: "/features", label: "Feature Store", icon: Database },
   { href: "/risk", label: "Risk Memory", icon: Target },

@@ -46,3 +46,10 @@ test("data quality page renders drift alert controls", async ({ page }) => {
   await expect(page.getByRole("button", { name: /Run Checks/i })).toBeVisible();
   await expect(page.getByText("Feature Drift Alerts")).toBeVisible();
 });
+
+test("simulation lab renders configurable campaign controls", async ({ page }) => {
+  await page.goto("/simulation");
+  await expect(page.getByRole("heading", { name: "Simulation Lab" })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Launch Campaign/i })).toBeVisible();
+  await expect(page.getByText("Scenario Library")).toBeVisible();
+});

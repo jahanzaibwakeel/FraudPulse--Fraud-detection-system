@@ -126,12 +126,16 @@ Case note:
 - `POST /simulator/control` pauses or resumes simulator generation with `{ "action": "pause" }` or `{ "action": "resume" }`.
 - `GET /simulator/scenarios` lists replayable fraud campaigns.
 - `POST /simulator/scenarios/:id/run` injects a named campaign into the real transaction/scoring pipeline.
+- `GET /simulation/lab` returns campaign metadata, target demo accounts, and recent simulation runs.
+- `GET /simulation/runs` lists persisted simulation campaign runs.
+- `POST /simulation/runs` launches a configurable campaign with transaction count, cadence, amount multiplier, fraud rate, device strategy, and IP strategy. Requires admin.
 
 Available scenario ids:
 
 - `card_testing_burst`
 - `impossible_travel`
 - `account_takeover`
+- `merchant_collusion`
 
 ## WebSocket Events
 

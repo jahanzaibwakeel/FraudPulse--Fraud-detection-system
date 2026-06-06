@@ -62,7 +62,7 @@ td { color: #d6e6ea; overflow: hidden; text-overflow: ellipsis; }
 .alertStack { display: grid; gap: 8px; padding: 12px; }
 .scenarioStack { display: grid; gap: 8px; padding: 12px; }
 .scenarioButton { text-align: left; display: grid; gap: 6px; padding: 12px; background: #0f2025; border: 1px solid #1d3942; color: var(--text); cursor: pointer; }
-.scenarioButton:hover { border-color: var(--cyan); background: #122a31; }
+.scenarioButton:hover, .scenarioButton.active { border-color: var(--cyan); background: #122a31; }
 .scenarioButton:disabled { opacity: 0.55; cursor: wait; }
 .scenarioButton strong { color: #f0fbfd; }
 .scenarioButton span { color: #adc4cb; font-size: 13px; line-height: 1.35; }

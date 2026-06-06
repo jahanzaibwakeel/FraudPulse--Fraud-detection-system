@@ -152,6 +152,10 @@ Round 10 upgrades alert detail into a full case investigation workspace. The API
 
 Round 11 adds data quality monitoring for the local event and feature pipeline. FraudPulse checks unscored transactions, invalid values, missing entity links, feature-store gaps, orphan events, dead-letter events, delayed scoring, ingestion freshness, scoring lag, and feature drift. Operators can run checks from the Data Quality page, persist quality runs, and track open drift/quality alerts.
 
+## Advanced Simulation Lab
+
+Round 12 adds a configurable fraud campaign lab. Operators can choose a target demo account, select a campaign, tune transaction count, cadence, amount multiplier, fraud rate, device strategy, and IP strategy, then inject the generated transactions into the real API, queue, scoring worker, alert, and WebSocket path. Each run is persisted with parameters, expected signals, transaction IDs, and status.
+
 ## Round Roadmap
 
 Completed:
@@ -167,10 +171,10 @@ Completed:
 - Round 9: Entity risk memory for users, cards, devices, IPs, and merchants
 - Round 10: Case investigation workspace with evidence bundles
 - Round 11: Data quality checks and drift alerting
+- Round 12: Advanced simulation lab for configurable fraud campaigns
 
 Remaining:
 
-- Round 12: Advanced simulation lab for configurable fraud campaigns
 - Round 13: Real model benchmarking across multiple local algorithms
 - Round 14: Security hardening V2 with login, sessions, and key rotation
 - Round 15: Deployment polish with CI, screenshots, and demo walkthrough
