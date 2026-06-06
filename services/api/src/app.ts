@@ -328,12 +328,21 @@ const buildDriftSummary = (row: DriftRow) => {
 export const createApp = () => {
   const app = express();
   const server = http.createServer(app);
-  const io = new Server(server, { cors: { origin: "*" } });
+  const socketOrigins = config.allowedOrigins.includes("*") ? "*" : config.allowedOrigins;
+  const io = new Server(server, { cors: { origin: socketOrigins } });
   let simulatorRunning = true;
   const security = createSecurity(config);
 
-  app.use(cors());
-  app.use(helmet());
+  app.use(security.requestId);
+  app.use(cors({
+    origin: (origin, callback) => {
+      const allowed = !origin || config.allowedOrigins.includes("*") || config.allowedOrigins.includes(origin);
+      callback(null, allowed);
+    },
+    allowedHeaders: ["Content-Type", "Authorization", "X-API-Token", "X-Session-Token", "X-Request-Id"],
+    exposedHeaders: ["RateLimit-Limit", "RateLimit-Remaining", "RateLimit-Reset", "X-Request-Id"]
+  }));
+  app.use(helmet({ crossOriginResourcePolicy: { policy: "cross-origin" } }));
   app.use(express.json({ limit: "1mb" }));
   app.use(pinoHttp({ logger }));
   app.set("io", io);
@@ -386,14 +395,29 @@ export const createApp = () => {
   });
 
   app.use(security.rateLimit);
+  app.post("/security/sessions", security.createSession);
   app.use(security.requireAuth());
 
   app.get("/security/session", (req, res) => {
     res.json(security.session(req));
   });
 
+  app.delete("/security/sessions/current", security.revokeCurrentSession);
+
   app.get("/security/rate-limits", security.requireAuth("admin"), (_req, res) => {
     res.json(security.rateLimitSnapshot());
+  });
+
+  app.get("/security/status", security.requireAuth("admin"), (_req, res) => {
+    res.json(security.securitySnapshot());
+  });
+
+  app.get("/security/events", security.requireAuth("admin"), (req, res) => {
+    res.json(security.securityEvents(Math.min(Number(req.query.limit ?? 100), 200)));
+  });
+
+  app.post("/security/token-rotation-plan", security.requireAuth("admin"), (req, res) => {
+    res.status(201).json(security.tokenRotationPlan(req.auth?.actor ?? "unknown"));
   });
 
   app.get("/security/audit", security.requireAuth("analyst"), async (req, res) => {

@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { io } from "socket.io-client";
 import { Activity, AlertTriangle, Pause, Play, Rocket, Zap } from "lucide-react";
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import { API_TOKEN, apiGet, apiPost, WS_URL } from "./lib/api";
+import { apiGet, apiPost, getAuthToken, WS_URL } from "./lib/api";
 import { MetricTile } from "./components/MetricTile";
 import { StatusPill } from "./components/StatusPill";
 
@@ -72,7 +72,7 @@ export default function Dashboard() {
     setMounted(true);
     refresh();
     apiGet<Scenario[]>("/simulator/scenarios").then(setScenarios);
-    const socket = io(WS_URL, { auth: { token: API_TOKEN } });
+    const socket = io(WS_URL, { auth: { token: getAuthToken() } });
     socket.on("connect", () => setConnected(true));
     socket.on("disconnect", () => setConnected(false));
     socket.on("transaction_created", refresh);

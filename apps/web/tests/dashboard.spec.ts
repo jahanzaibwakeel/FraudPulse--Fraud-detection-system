@@ -9,7 +9,9 @@ test("dashboard renders live monitoring surface", async ({ page }) => {
 test("security console renders hardening surface", async ({ page }) => {
   await page.goto("/security");
   await expect(page.getByRole("heading", { name: "Security & Reports" })).toBeVisible();
+  await expect(page.getByText("Session Controls")).toBeVisible();
   await expect(page.getByText("Protected Exports")).toBeVisible();
+  await expect(page.getByText("Token Rotation Plan")).toBeVisible();
 });
 
 test("performance page exposes local model training", async ({ page }) => {

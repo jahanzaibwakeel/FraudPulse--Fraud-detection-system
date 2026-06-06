@@ -69,7 +69,7 @@ Default roles:
 - `local-admin-token`: rule tuning, simulator controls, model recalibration, security console
 - `local-service-token`: simulator transaction ingestion and worker broadcasts
 
-Change `API_TOKENS`, `NEXT_PUBLIC_API_TOKEN`, and `API_SERVICE_TOKEN` in `.env` for a real local deployment. The Security page shows the current session, rate-limit buckets, audit activity, and protected report exports.
+Change `API_TOKENS`, `NEXT_PUBLIC_API_TOKEN`, and `API_SERVICE_TOKEN` in `.env` for a real local deployment. The Security page shows the current session, active session tokens, rate-limit buckets, failed-auth security events, audit activity, token rotation planning, and protected report exports.
 
 ## Architecture
 
@@ -160,6 +160,10 @@ Round 12 adds a configurable fraud campaign lab. Operators can choose a target d
 
 Round 13 adds a local model benchmark suite. FraudPulse evaluates the same feature-store validation split across the rule baseline, trained logistic regression, Gaussian naive Bayes, and nearest-centroid classifiers. Benchmark runs are persisted with metrics, confusion matrices, algorithms tested, and the best algorithm by F1/recall.
 
+## Security Hardening V2
+
+Round 14 upgrades the local security layer with hashed API-token matching, constant-time comparisons, expiring local sessions, session revocation, failed-auth lockouts, request IDs, restricted CORS and Socket.IO origins, security event telemetry, and token rotation planning. The system remains fully local and free while showing the controls a fraud operations API would need before deployment.
+
 ## Round Roadmap
 
 Completed:
@@ -177,10 +181,10 @@ Completed:
 - Round 11: Data quality checks and drift alerting
 - Round 12: Advanced simulation lab for configurable fraud campaigns
 - Round 13: Real model benchmarking across multiple local algorithms
+- Round 14: Security hardening V2 with local sessions, lockouts, request IDs, and key rotation planning
 
 Remaining:
 
-- Round 14: Security hardening V2 with login, sessions, and key rotation
 - Round 15: Deployment polish with CI, screenshots, and demo walkthrough
 
 ## Documentation

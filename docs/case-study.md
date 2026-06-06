@@ -79,7 +79,11 @@ The thirteenth round adds a local benchmark harness for model selection. FraudPu
 
 ## Production Hardening
 
-The final round adds local role-based API tokens, protected Socket.IO connections, service tokens for simulator/worker traffic, per-token rate limiting, audit-log inspection, and downloadable analyst reports. These controls keep the demo runnable on one laptop while showing production instincts: least-privilege mutation routes, operational exports, observable access patterns, and tests for rejected unauthorized access.
+The fifth round adds local role-based API tokens, protected Socket.IO connections, service tokens for simulator/worker traffic, per-token rate limiting, audit-log inspection, and downloadable analyst reports. These controls keep the demo runnable on one laptop while showing production instincts: least-privilege mutation routes, operational exports, observable access patterns, and tests for rejected unauthorized access.
+
+## Security Hardening V2
+
+The fourteenth round deepens the local security model. FraudPulse now hashes configured API tokens, compares credentials in constant time, issues expiring local session tokens, tracks failed authentication attempts, creates short lockouts, restricts browser origins, and attaches request IDs to API responses. The Security page exposes active sessions, lockouts, security events, and a token rotation plan that generates replacement `.env` lines without using a paid vault.
 
 ## Metrics and Feedback
 

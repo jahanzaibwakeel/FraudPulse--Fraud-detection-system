@@ -4,7 +4,7 @@ Base URL in Docker Compose: `http://localhost:14000`
 
 ## Authentication
 
-All operational routes require a local token in `x-api-token` or `Authorization: Bearer <token>`. `GET /health` and `GET /metrics` remain public for container health checks and Prometheus scraping.
+All operational routes require a local token in `x-api-token` or `Authorization: Bearer <token>`. Admins can exchange a local API token for an expiring local session token through `POST /security/sessions`, then use that session token as `Authorization: Bearer <sessionToken>`. `GET /health` and `GET /metrics` remain public for container health checks and Prometheus scraping.
 
 Default local tokens:
 
@@ -13,14 +13,19 @@ Default local tokens:
 - Admin: `local-admin-token`
 - Service: `local-service-token`
 
-Mutation routes enforce role checks. Simulator ingestion and worker broadcasts use the service token.
+Mutation routes enforce role checks. Simulator ingestion and worker broadcasts use the service token. API tokens are matched by SHA-256 fingerprint with constant-time comparison; the API also emits request IDs, tracks failed authentication attempts, applies short lockouts, and restricts browser origins through `ALLOWED_ORIGINS`.
 
 ## Health and Metrics
 
 - `GET /health` returns API and database health.
 - `GET /metrics` exposes Prometheus metrics.
+- `POST /security/sessions` exchanges a valid API token for an expiring local session token.
 - `GET /security/session` returns the authenticated local principal.
+- `DELETE /security/sessions/current` revokes the current local session token.
 - `GET /security/rate-limits` returns active rate-limit buckets. Requires admin.
+- `GET /security/status` returns token fingerprints, active sessions, lockouts, and policy settings. Requires admin.
+- `GET /security/events?limit=80` returns in-memory security telemetry for auth failures, lockouts, sessions, and denied authorization. Requires admin.
+- `POST /security/token-rotation-plan` generates replacement `API_TOKENS` lines for local key rotation. Requires admin.
 - `GET /security/audit?limit=80` returns recent audit logs. Requires analyst.
 
 ## Transactions
