@@ -1,0 +1,37 @@
+"use client";
+
+import { useEffect, useState } from "react";
+import { apiGet } from "../lib/api";
+import { MetricTile } from "../components/MetricTile";
+
+type Overview = {
+  tx_1h: string;
+  alerts_1h: string;
+  pending_reviews: string;
+  avg_latency_ms: string;
+  queue: { waiting: number; active: number; failed: number; delayed: number };
+};
+
+export default function MetricsPage() {
+  const [overview, setOverview] = useState<Overview | null>(null);
+  useEffect(() => {
+    apiGet<Overview>("/admin/overview").then(setOverview);
+    const timer = setInterval(() => apiGet<Overview>("/admin/overview").then(setOverview), 5000);
+    return () => clearInterval(timer);
+  }, []);
+  return (
+    <div className="screen">
+      <header className="topbar"><div><p className="eyebrow">Operational telemetry</p><h1>System Metrics</h1></div></header>
+      <section className="metricGrid">
+        <MetricTile label="API throughput 1h" value={overview?.tx_1h ?? 0} />
+        <MetricTile label="Alerts 1h" value={overview?.alerts_1h ?? 0} tone="hot" />
+        <MetricTile label="Active jobs" value={overview?.queue.active ?? 0} tone="cool" />
+        <MetricTile label="Failed jobs" value={overview?.queue.failed ?? 0} tone="warn" />
+        <MetricTile label="Avg latency" value={`${Math.round(Number(overview?.avg_latency_ms ?? 0))} ms`} />
+      </section>
+      <section className="panel formRow">
+        <p>Prometheus scrapes `/metrics` from the API and worker. Grafana is provisioned at port 3001 with the FraudPulse dashboard.</p>
+      </section>
+    </div>
+  );
+}

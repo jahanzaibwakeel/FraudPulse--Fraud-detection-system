@@ -1,0 +1,52 @@
+{
+  "title": "FraudPulse Real-Time Risk Operations",
+  "uid": "fraudpulse-risk-ops",
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Transaction Throughput",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 0 },
+      "targets": [{ "expr": "rate(fraudpulse_transactions_total[1m])", "legendFormat": "tx/s" }]
+    },
+    {
+      "type": "timeseries",
+      "title": "Alerts by Severity",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 0 },
+      "targets": [{ "expr": "sum by (severity) (rate(fraudpulse_worker_alerts_total[1m]))", "legendFormat": "{{severity}}" }]
+    },
+    {
+      "type": "timeseries",
+      "title": "Average Scoring Latency",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 0 },
+      "targets": [{ "expr": "rate(fraudpulse_scoring_latency_ms_sum[1m]) / rate(fraudpulse_scoring_latency_ms_count[1m])", "legendFormat": "ms" }]
+    },
+    {
+      "type": "stat",
+      "title": "Queue Depth",
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 8 },
+      "targets": [{ "expr": "fraudpulse_queue_depth", "legendFormat": "jobs" }]
+    },
+    {
+      "type": "stat",
+      "title": "Confirmed Fraud",
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 8 },
+      "targets": [{ "expr": "fraudpulse_confirmed_fraud_count", "legendFormat": "confirmed" }]
+    },
+    {
+      "type": "stat",
+      "title": "False Positives",
+      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 8 },
+      "targets": [{ "expr": "fraudpulse_false_positive_count", "legendFormat": "false positive" }]
+    },
+    {
+      "type": "timeseries",
+      "title": "API Process Health",
+      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 8 },
+      "targets": [{ "expr": "fraudpulse_api_process_cpu_user_seconds_total", "legendFormat": "cpu" }]
+    }
+  ]
+}

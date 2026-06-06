@@ -1,0 +1,1052 @@
+import http from "node:http";
+import cors from "cors";
+import express from "express";
+import helmet from "helmet";
+import { pinoHttp } from "pino-http";
+import { Server } from "socket.io";
+import { z } from "zod";
+import { trainFraudLogisticModel, TransactionInputSchema, type FraudTrainingSample, type TransactionInput } from "@fraudpulse/shared";
+import { config } from "./config.js";
+import { query } from "./db.js";
+import { logger } from "./logger.js";
+import { alertCount, registry, reviewDecisions, transactionThroughput } from "./metrics.js";
+import { scoringQueue } from "./queue.js";
+import { buildFraudRingGraph, type SuspiciousTransactionRow } from "./ringGraph.js";
+import { buildScenarioTransactions, scenarios, type DemoAccount, type DemoMerchant } from "./scenarios.js";
+import { createSecurity } from "./security.js";
+
+const csvCell = (value: unknown) => {
+  const text = value == null ? "" : String(value);
+  return `"${text.replaceAll("\"", "\"\"")}"`;
+};
+
+const toCsv = (rows: Record<string, unknown>[], columns: string[]) => [
+  columns.map(csvCell).join(","),
+  ...rows.map(row => columns.map(column => csvCell(row[column])).join(","))
+].join("\n");
+
+type TrainingRow = {
+  actual: boolean;
+  rule_score: string | number | null;
+  velocity_5m: string | number;
+  velocity_1h: string | number;
+  user_tx_30d: string | number;
+  amount_zscore: string | number;
+  geo_kmh: string | number;
+  merchant_risk: string | number;
+  device_seen: boolean;
+};
+
+const toTrainingSample = (row: TrainingRow): FraudTrainingSample => ({
+  actual: row.actual,
+  ruleScore: Number(row.rule_score ?? 0),
+  features: {
+    velocity5m: Number(row.velocity_5m),
+    velocity1h: Number(row.velocity_1h),
+    userTx30d: Number(row.user_tx_30d),
+    amountZscore: Number(row.amount_zscore),
+    geoKmh: Number(row.geo_kmh),
+    merchantRisk: Number(row.merchant_risk),
+    deviceSeen: row.device_seen
+  }
+});
+
+export const createApp = () => {
+  const app = express();
+  const server = http.createServer(app);
+  const io = new Server(server, { cors: { origin: "*" } });
+  let simulatorRunning = true;
+  const security = createSecurity(config);
+
+  app.use(cors());
+  app.use(helmet());
+  app.use(express.json({ limit: "1mb" }));
+  app.use(pinoHttp({ logger }));
+  app.set("io", io);
+
+  io.use(security.authenticateSocket);
+  io.on("connection", socket => {
+    socket.emit("system", { status: "connected", actor: socket.data.auth?.actor, at: new Date().toISOString() });
+  });
+
+  const createTransaction = async (input: TransactionInput, source = "api") => {
+    const tx = await query<{ id: string }>(
+      `INSERT INTO transactions
+        (user_id, card_id, merchant_id, amount, currency, occurred_at, latitude, longitude, channel, device_fingerprint, ip_address, is_fraud_ground_truth)
+       VALUES ($1,$2,$3,$4,$5,COALESCE($6, now()),$7,$8,$9,$10,$11,$12)
+       RETURNING id`,
+      [
+        input.userId,
+        input.cardId,
+        input.merchantId,
+        input.amount,
+        input.currency,
+        input.occurredAt,
+        input.latitude,
+        input.longitude,
+        input.channel,
+        input.deviceFingerprint,
+        input.ipAddress,
+        input.isFraudGroundTruth ?? false
+      ]
+    );
+    const transactionId = tx.rows[0].id;
+    await query(
+      "INSERT INTO transaction_events (transaction_id, event_type, payload) VALUES ($1, 'transaction_created', $2)",
+      [transactionId, { ...input, source }]
+    );
+    await scoringQueue.add("score", { transactionId, source });
+    transactionThroughput.inc();
+    io.emit("transaction_created", { transactionId, source });
+    return transactionId;
+  };
+
+  app.get("/health", async (_req, res) => {
+    await query("SELECT 1");
+    res.json({ status: "ok", service: "fraudpulse-api", at: new Date().toISOString() });
+  });
+
+  app.get("/metrics", async (_req, res) => {
+    res.set("Content-Type", registry.contentType);
+    res.send(await registry.metrics());
+  });
+
+  app.use(security.rateLimit);
+  app.use(security.requireAuth());
+
+  app.get("/security/session", (req, res) => {
+    res.json(security.session(req));
+  });
+
+  app.get("/security/rate-limits", security.requireAuth("admin"), (_req, res) => {
+    res.json(security.rateLimitSnapshot());
+  });
+
+  app.get("/security/audit", security.requireAuth("analyst"), async (req, res) => {
+    const limit = Math.min(Number(req.query.limit ?? 80), 250);
+    const actor = req.query.actor ? String(req.query.actor) : null;
+    const action = req.query.action ? String(req.query.action) : null;
+    const result = await query(
+      `SELECT * FROM audit_logs
+       WHERE ($1::text IS NULL OR actor = $1)
+         AND ($2::text IS NULL OR action = $2)
+       ORDER BY created_at DESC
+       LIMIT $3`,
+      [actor, action, limit]
+    );
+    res.json(result.rows);
+  });
+
+  app.post("/transactions", security.requireAuth("service"), async (req, res, next) => {
+    try {
+      const input = TransactionInputSchema.parse(req.body);
+      const transactionId = await createTransaction(input);
+      res.status(201).json({ id: transactionId, status: "queued_for_scoring" });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/transactions", async (req, res) => {
+    const limit = Math.min(Number(req.query.limit ?? 80), 250);
+    const result = await query(
+      `SELECT t.*, m.name AS merchant_name, m.category AS merchant_category, fs.score, fs.severity
+       FROM transactions t
+       JOIN merchants m ON m.id = t.merchant_id
+       LEFT JOIN fraud_scores fs ON fs.transaction_id = t.id
+       ORDER BY t.occurred_at DESC
+       LIMIT $1`,
+      [limit]
+    );
+    res.json(result.rows);
+  });
+
+  app.get("/transactions/stream", async (req, res) => {
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive"
+    });
+    const send = (event: string, payload: unknown) => {
+      res.write(`event: ${event}\n`);
+      res.write(`data: ${JSON.stringify(payload)}\n\n`);
+    };
+    const transactionHandler = (payload: unknown) => send("transaction_created", payload);
+    const scoreHandler = (payload: unknown) => send("transaction_scored", payload);
+    const alertHandler = (payload: unknown) => send("fraud_alert_created", payload);
+    io.on("transaction_created", transactionHandler);
+    io.on("transaction_scored", scoreHandler);
+    io.on("fraud_alert_created", alertHandler);
+    send("connected", { at: new Date().toISOString() });
+    req.on("close", () => {
+      io.off("transaction_created", transactionHandler);
+      io.off("transaction_scored", scoreHandler);
+      io.off("fraud_alert_created", alertHandler);
+    });
+  });
+
+  app.get("/alerts", async (req, res) => {
+    const status = req.query.status ? String(req.query.status) : null;
+    const severity = req.query.severity ? String(req.query.severity) : null;
+    const assignedTo = req.query.assignedTo ? String(req.query.assignedTo) : null;
+    const overdue = req.query.overdue === "true";
+    const merchantCategory = req.query.merchantCategory ? String(req.query.merchantCategory) : null;
+    const q = req.query.q ? `%${String(req.query.q).toLowerCase()}%` : null;
+    const result = await query(
+      `SELECT fa.*, u.full_name, m.name AS merchant_name, t.amount, t.currency, t.channel, t.occurred_at
+       FROM fraud_alerts fa
+       JOIN users u ON u.id = fa.user_id
+       JOIN merchants m ON m.id = fa.merchant_id
+       JOIN transactions t ON t.id = fa.transaction_id
+       WHERE ($1::text IS NULL OR fa.status = $1)
+         AND ($2::text IS NULL OR fa.severity = $2)
+         AND (
+           $3::text IS NULL OR
+           ($3 = 'unassigned' AND fa.assigned_to IS NULL) OR
+           fa.assigned_to = $3
+         )
+         AND ($4::boolean = false OR (fa.due_at IS NOT NULL AND fa.due_at < now() AND fa.status = 'pending'))
+         AND ($5::text IS NULL OR m.category = $5)
+         AND (
+           $6::text IS NULL OR
+           lower(u.full_name) LIKE $6 OR
+           lower(m.name) LIKE $6 OR
+           lower(fa.severity) LIKE $6 OR
+           lower(COALESCE(fa.assigned_to, 'unassigned')) LIKE $6
+         )
+       ORDER BY fa.created_at DESC
+       LIMIT 200`,
+      [status, severity, assignedTo, overdue, merchantCategory, q]
+    );
+    res.json(result.rows);
+  });
+
+  app.post("/alerts/bulk/assign", security.requireAuth("analyst"), async (req, res, next) => {
+    try {
+      const body = z.object({
+        alertIds: z.array(z.string().uuid()).min(1).max(200),
+        assignedTo: z.string().min(2),
+        priority: z.number().int().min(1).max(5),
+        slaHours: z.number().int().min(1).max(168).default(24),
+        actor: z.string().min(2).default("demo-lead")
+      }).parse(req.body);
+      const result = await query(
+        `UPDATE fraud_alerts
+         SET assigned_to = $1, priority = $2, due_at = now() + ($3 || ' hours')::interval, updated_at = now()
+         WHERE id = ANY($4::uuid[])
+         RETURNING id`,
+        [body.assignedTo, body.priority, body.slaHours, body.alertIds]
+      );
+      await query(
+        "INSERT INTO audit_logs (actor, action, entity_type, entity_id, payload) VALUES ($1,'bulk_case_assigned','fraud_alert','bulk',$2)",
+        [body.actor, { ...body, updatedCount: result.rowCount }]
+      );
+      io.emit("bulk_case_assigned", { updatedCount: result.rowCount, assignedTo: body.assignedTo });
+      res.json({ updatedCount: result.rowCount });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/alerts/bulk/review", security.requireAuth("analyst"), async (req, res, next) => {
+    try {
+      const body = z.object({
+        alertIds: z.array(z.string().uuid()).min(1).max(100),
+        decision: z.enum(["confirmed_fraud", "false_positive"]),
+        analyst: z.string().min(2),
+        notes: z.string().optional()
+      }).parse(req.body);
+      const result = await query(
+        "UPDATE fraud_alerts SET status = $1, updated_at = now() WHERE id = ANY($2::uuid[]) RETURNING id",
+        [body.decision, body.alertIds]
+      );
+      for (const row of result.rows) {
+        await query(
+          "INSERT INTO review_decisions (alert_id, decision, analyst, notes) VALUES ($1,$2,$3,$4)",
+          [row.id, body.decision, body.analyst, body.notes ?? null]
+        );
+      }
+      await query(
+        "INSERT INTO audit_logs (actor, action, entity_type, entity_id, payload) VALUES ($1,'bulk_review_decision','fraud_alert','bulk',$2)",
+        [body.analyst, { ...body, updatedCount: result.rowCount }]
+      );
+      reviewDecisions.inc({ decision: body.decision }, result.rowCount ?? 0);
+      io.emit("bulk_review_decision", { updatedCount: result.rowCount, decision: body.decision });
+      res.json({ updatedCount: result.rowCount });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/alerts/:id", async (req, res) => {
+    const result = await query(
+      `SELECT fa.*, row_to_json(t.*) AS transaction, row_to_json(u.*) AS user, row_to_json(m.*) AS merchant,
+        COALESCE((
+          SELECT json_agg(n ORDER BY n.created_at DESC)
+          FROM alert_case_notes n
+          WHERE n.alert_id = fa.id
+        ), '[]'::json) AS case_notes,
+        COALESCE((
+          SELECT json_agg(rd ORDER BY rd.created_at DESC)
+          FROM review_decisions rd
+          WHERE rd.alert_id = fa.id
+        ), '[]'::json) AS review_decisions,
+        COALESCE((
+          SELECT json_agg(al ORDER BY al.created_at DESC)
+          FROM audit_logs al
+          WHERE al.entity_type = 'fraud_alert' AND al.entity_id = fa.id::text
+        ), '[]'::json) AS audit_trail
+       FROM fraud_alerts fa
+       JOIN transactions t ON t.id = fa.transaction_id
+       JOIN users u ON u.id = fa.user_id
+       JOIN merchants m ON m.id = fa.merchant_id
+       WHERE fa.id = $1`,
+      [req.params.id]
+    );
+    if (!result.rowCount) return res.status(404).json({ error: "alert_not_found" });
+    res.json(result.rows[0]);
+  });
+
+  app.post("/alerts/:id/assign", security.requireAuth("analyst"), async (req, res, next) => {
+    try {
+      const body = z.object({
+        assignedTo: z.string().min(2),
+        priority: z.number().int().min(1).max(5),
+        slaHours: z.number().int().min(1).max(168).default(24),
+        actor: z.string().min(2).default("demo-lead")
+      }).parse(req.body);
+      const result = await query(
+        `UPDATE fraud_alerts
+         SET assigned_to = $1, priority = $2, due_at = now() + ($3 || ' hours')::interval, updated_at = now()
+         WHERE id = $4
+         RETURNING id, assigned_to, priority, due_at`,
+        [body.assignedTo, body.priority, body.slaHours, req.params.id]
+      );
+      if (!result.rowCount) return res.status(404).json({ error: "alert_not_found" });
+      await query(
+        "INSERT INTO audit_logs (actor, action, entity_type, entity_id, payload) VALUES ($1,'case_assigned','fraud_alert',$2,$3)",
+        [body.actor, req.params.id, body]
+      );
+      io.emit("case_assigned", { alertId: req.params.id, ...result.rows[0] });
+      res.json(result.rows[0]);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/alerts/:id/notes", security.requireAuth("analyst"), async (req, res, next) => {
+    try {
+      const body = z.object({
+        author: z.string().min(2),
+        note: z.string().min(3).max(2000)
+      }).parse(req.body);
+      const alert = await query("SELECT id FROM fraud_alerts WHERE id = $1", [req.params.id]);
+      if (!alert.rowCount) return res.status(404).json({ error: "alert_not_found" });
+      const note = await query(
+        "INSERT INTO alert_case_notes (alert_id, author, note) VALUES ($1,$2,$3) RETURNING *",
+        [req.params.id, body.author, body.note]
+      );
+      await query(
+        "INSERT INTO audit_logs (actor, action, entity_type, entity_id, payload) VALUES ($1,'case_note_added','fraud_alert',$2,$3)",
+        [body.author, req.params.id, body]
+      );
+      io.emit("case_note_added", { alertId: req.params.id, note: note.rows[0] });
+      res.status(201).json(note.rows[0]);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/alerts/:id/review", security.requireAuth("analyst"), async (req, res, next) => {
+    try {
+      const body = z.object({
+        decision: z.enum(["confirmed_fraud", "false_positive"]),
+        analyst: z.string().min(2),
+        notes: z.string().optional()
+      }).parse(req.body);
+      const client = await query("SELECT id FROM fraud_alerts WHERE id = $1", [req.params.id]);
+      if (!client.rowCount) return res.status(404).json({ error: "alert_not_found" });
+      await query(
+        "INSERT INTO review_decisions (alert_id, decision, analyst, notes) VALUES ($1,$2,$3,$4)",
+        [req.params.id, body.decision, body.analyst, body.notes ?? null]
+      );
+      await query("UPDATE fraud_alerts SET status = $1, updated_at = now() WHERE id = $2", [
+        body.decision,
+        req.params.id
+      ]);
+      await query(
+        "INSERT INTO transaction_events (event_type, payload) VALUES ('review_decision_recorded', $1)",
+        [{ alertId: req.params.id, ...body }]
+      );
+      await query(
+        "INSERT INTO audit_logs (actor, action, entity_type, entity_id, payload) VALUES ($1,'review_decision','fraud_alert',$2,$3)",
+        [body.analyst, req.params.id, body]
+      );
+      reviewDecisions.inc({ decision: body.decision });
+      io.emit("review_decision_recorded", { alertId: req.params.id, ...body });
+      res.json({ status: "recorded" });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/alert-views", async (req, res) => {
+    const owner = req.query.owner ? String(req.query.owner) : null;
+    const result = await query(
+      "SELECT * FROM saved_alert_views WHERE ($1::text IS NULL OR owner = $1) ORDER BY updated_at DESC",
+      [owner]
+    );
+    res.json(result.rows);
+  });
+
+  app.post("/alert-views", security.requireAuth("analyst"), async (req, res, next) => {
+    try {
+      const body = z.object({
+        name: z.string().min(2).max(80),
+        owner: z.string().min(2).default("demo-lead"),
+        filters: z.record(z.unknown()).default({})
+      }).parse(req.body ?? {});
+      const result = await query(
+        "INSERT INTO saved_alert_views (name, owner, filters) VALUES ($1,$2,$3) RETURNING *",
+        [body.name, body.owner, body.filters]
+      );
+      res.status(201).json(result.rows[0]);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.delete("/alert-views/:id", security.requireAuth("analyst"), async (req, res) => {
+    const result = await query("DELETE FROM saved_alert_views WHERE id = $1 RETURNING id", [req.params.id]);
+    if (!result.rowCount) return res.status(404).json({ error: "view_not_found" });
+    res.json({ deleted: req.params.id });
+  });
+
+  app.get("/operations/sla", async (_req, res) => {
+    const summary = await query(
+      `SELECT
+        count(*) FILTER (WHERE status = 'pending') AS pending,
+        count(*) FILTER (WHERE status = 'pending' AND due_at IS NOT NULL AND due_at < now()) AS breached,
+        count(*) FILTER (WHERE status = 'pending' AND due_at BETWEEN now() AND now() + interval '4 hours') AS due_soon,
+        count(*) FILTER (WHERE status = 'pending' AND assigned_to IS NULL) AS unassigned,
+        count(*) FILTER (WHERE status = 'pending' AND severity IN ('high', 'critical')) AS high_risk_pending
+       FROM fraud_alerts`
+    );
+    const workload = await query(
+      `SELECT COALESCE(assigned_to, 'Unassigned') AS analyst,
+        count(*) AS pending,
+        count(*) FILTER (WHERE due_at IS NOT NULL AND due_at < now()) AS breached,
+        count(*) FILTER (WHERE severity = 'critical') AS critical
+       FROM fraud_alerts
+       WHERE status = 'pending'
+       GROUP BY COALESCE(assigned_to, 'Unassigned')
+       ORDER BY breached DESC, pending DESC
+       LIMIT 20`
+    );
+    const breached = await query(
+      `SELECT fa.*, u.full_name, m.name AS merchant_name, t.amount, t.currency, t.occurred_at
+       FROM fraud_alerts fa
+       JOIN users u ON u.id = fa.user_id
+       JOIN merchants m ON m.id = fa.merchant_id
+       JOIN transactions t ON t.id = fa.transaction_id
+       WHERE fa.status = 'pending' AND fa.due_at IS NOT NULL AND fa.due_at < now()
+       ORDER BY fa.due_at ASC
+       LIMIT 50`
+    );
+    res.json({ ...summary.rows[0], workload: workload.rows, breachedAlerts: breached.rows });
+  });
+
+  app.get("/dlq/events", async (req, res) => {
+    const limit = Math.min(Number(req.query.limit ?? 100), 250);
+    const result = await query(
+      `SELECT * FROM transaction_events
+       WHERE event_type = 'scoring_failed_dead_letter'
+       ORDER BY created_at DESC
+       LIMIT $1`,
+      [limit]
+    );
+    res.json(result.rows);
+  });
+
+  app.post("/dlq/events/:id/replay", security.requireAuth("admin"), async (req, res, next) => {
+    try {
+      const actor = z.object({ actor: z.string().min(2).default("demo-operator") }).parse(req.body ?? {}).actor;
+      const result = await query<{ id: string; transaction_id: string | null; payload: { transactionId?: string } }>(
+        "SELECT id, transaction_id, payload FROM transaction_events WHERE id = $1 AND event_type = 'scoring_failed_dead_letter'",
+        [req.params.id]
+      );
+      if (!result.rowCount) return res.status(404).json({ error: "dead_letter_event_not_found" });
+      const event = result.rows[0];
+      const transactionId = event.transaction_id ?? event.payload.transactionId;
+      if (!transactionId) return res.status(400).json({ error: "dead_letter_missing_transaction_id" });
+      await scoringQueue.add("score", { transactionId, replayedFromEventId: event.id });
+      await query(
+        "INSERT INTO audit_logs (actor, action, entity_type, entity_id, payload) VALUES ($1,'dead_letter_replayed','transaction_event',$2,$3)",
+        [actor, String(event.id), { transactionId }]
+      );
+      io.emit("dead_letter_replayed", { eventId: event.id, transactionId });
+      res.json({ status: "requeued", eventId: event.id, transactionId });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/profiles/users/:id", async (req, res) => {
+    const result = await query(
+      `SELECT u.*,
+        COALESCE(avg(t.amount), 0) AS avg_amount,
+        COALESCE(stddev_pop(t.amount), 0) AS std_amount,
+        count(t.id) AS transaction_count,
+        count(fa.id) AS alert_count
+       FROM users u
+       LEFT JOIN transactions t ON t.user_id = u.id
+       LEFT JOIN fraud_alerts fa ON fa.user_id = u.id
+       WHERE u.id = $1
+       GROUP BY u.id`,
+      [req.params.id]
+    );
+    if (!result.rowCount) return res.status(404).json({ error: "user_not_found" });
+    res.json(result.rows[0]);
+  });
+
+  app.get("/profiles/merchants/:id", async (req, res) => {
+    const result = await query(
+      `SELECT m.*, count(t.id) AS transaction_count, count(fa.id) AS alert_count, COALESCE(avg(fs.score), 0) AS avg_score
+       FROM merchants m
+       LEFT JOIN transactions t ON t.merchant_id = m.id
+       LEFT JOIN fraud_scores fs ON fs.transaction_id = t.id
+       LEFT JOIN fraud_alerts fa ON fa.merchant_id = m.id
+       WHERE m.id = $1
+       GROUP BY m.id`,
+      [req.params.id]
+    );
+    if (!result.rowCount) return res.status(404).json({ error: "merchant_not_found" });
+    res.json(result.rows[0]);
+  });
+
+  app.get("/rules", async (_req, res) => {
+    const result = await query("SELECT * FROM scoring_rules ORDER BY code");
+    res.json(result.rows);
+  });
+
+  app.patch("/rules/:code", security.requireAuth("admin"), async (req, res) => {
+    const body = z.object({ enabled: z.boolean().optional(), weight: z.number().optional() }).parse(req.body);
+    const result = await query(
+      "UPDATE scoring_rules SET enabled = COALESCE($1, enabled), weight = COALESCE($2, weight), updated_at = now() WHERE code = $3 RETURNING *",
+      [body.enabled ?? null, body.weight ?? null, req.params.code]
+    );
+    if (!result.rowCount) return res.status(404).json({ error: "rule_not_found" });
+    res.json(result.rows[0]);
+  });
+
+  app.post("/rules/preview", security.requireAuth("analyst"), async (req, res) => {
+    const body = z.object({
+      weights: z.record(z.number().min(0).max(100)).default({}),
+      disabled: z.array(z.string()).default([]),
+      alertThreshold: z.number().min(1).max(99).default(55)
+    }).parse(req.body ?? {});
+    const [rules, samples] = await Promise.all([
+      query<{ code: string; weight: string }>("SELECT code, weight FROM scoring_rules"),
+      query<{ actual: boolean; current_score: string; reasons: Array<{ rule: string; scoreImpact: number }> }>(
+        `SELECT t.is_fraud_ground_truth AS actual, fs.score AS current_score, fs.reasons
+         FROM fraud_scores fs
+         JOIN transactions t ON t.id = fs.transaction_id
+         ORDER BY fs.created_at DESC
+         LIMIT 5000`
+      )
+    ]);
+    const currentWeights = new Map(rules.rows.map(rule => [rule.code, Number(rule.weight)]));
+    const disabled = new Set(body.disabled);
+    const metric = { tp: 0, fp: 0, tn: 0, fn: 0 };
+    let currentAlerts = 0;
+    let previewAlerts = 0;
+    let scoreDeltaTotal = 0;
+
+    for (const sample of samples.rows) {
+      const reasons = Array.isArray(sample.reasons) ? sample.reasons : [];
+      const currentScore = Number(sample.current_score);
+      const adjustedScore = reasons.reduce((sum, reason) => {
+        if (disabled.has(reason.rule)) return sum;
+        const currentWeight = currentWeights.get(reason.rule) ?? reason.scoreImpact;
+        const nextWeight = body.weights[reason.rule] ?? currentWeight;
+        const scaledImpact = currentWeight <= 0 ? reason.scoreImpact : reason.scoreImpact * (nextWeight / currentWeight);
+        return sum + scaledImpact;
+      }, 0);
+      const previewScore = Math.min(99, Number(adjustedScore.toFixed(2)));
+      const predicted = previewScore >= body.alertThreshold;
+      if (currentScore >= 55) currentAlerts += 1;
+      if (predicted) previewAlerts += 1;
+      scoreDeltaTotal += previewScore - currentScore;
+      if (sample.actual && predicted) metric.tp += 1;
+      else if (!sample.actual && predicted) metric.fp += 1;
+      else if (!sample.actual && !predicted) metric.tn += 1;
+      else metric.fn += 1;
+    }
+
+    const precision = metric.tp + metric.fp === 0 ? 0 : metric.tp / (metric.tp + metric.fp);
+    const recall = metric.tp + metric.fn === 0 ? 0 : metric.tp / (metric.tp + metric.fn);
+    const f1Score = precision + recall === 0 ? 0 : (2 * precision * recall) / (precision + recall);
+    res.json({
+      sampleSize: samples.rowCount,
+      currentAlerts,
+      previewAlerts,
+      alertDelta: previewAlerts - currentAlerts,
+      averageScoreDelta: samples.rowCount ? scoreDeltaTotal / samples.rowCount : 0,
+      precision,
+      recall,
+      f1Score,
+      falsePositiveRate: metric.fp + metric.tn === 0 ? 0 : metric.fp / (metric.fp + metric.tn),
+      truePositiveRate: recall,
+      confusionMatrix: {
+        truePositive: metric.tp,
+        falsePositive: metric.fp,
+        trueNegative: metric.tn,
+        falseNegative: metric.fn
+      }
+    });
+  });
+
+  app.get("/features/overview", async (_req, res) => {
+    const summary = await query(
+      `SELECT
+        count(*) AS feature_count,
+        COALESCE(avg(velocity_5m), 0) AS avg_velocity_5m,
+        COALESCE(avg(velocity_1h), 0) AS avg_velocity_1h,
+        COALESCE(avg(amount_zscore), 0) AS avg_amount_zscore,
+        COALESCE(max(amount_zscore), 0) AS max_amount_zscore,
+        COALESCE(avg(geo_kmh), 0) AS avg_geo_kmh,
+        COALESCE(max(geo_kmh), 0) AS max_geo_kmh,
+        COALESCE(avg(merchant_risk), 0) AS avg_merchant_risk,
+        count(*) FILTER (WHERE NOT device_seen) AS new_device_count
+       FROM transaction_features
+       WHERE created_at >= now() - interval '24 hours'`
+    );
+    const topAnomalies = await query(
+      `SELECT tf.*, t.amount, t.currency, u.full_name, m.name AS merchant_name, fs.score, fs.severity
+       FROM transaction_features tf
+       JOIN transactions t ON t.id = tf.transaction_id
+       JOIN users u ON u.id = tf.user_id
+       JOIN merchants m ON m.id = tf.merchant_id
+       JOIN fraud_scores fs ON fs.transaction_id = tf.transaction_id
+       ORDER BY (abs(tf.amount_zscore) + (tf.geo_kmh / 500) + tf.velocity_5m + (CASE WHEN tf.device_seen THEN 0 ELSE 3 END)) DESC
+       LIMIT 20`
+    );
+    res.json({ ...summary.rows[0], topAnomalies: topAnomalies.rows });
+  });
+
+  app.get("/features/transactions/:id", async (req, res) => {
+    const result = await query(
+      `SELECT tf.*, t.amount, t.currency, t.channel, t.occurred_at, u.full_name, m.name AS merchant_name, fs.score, fs.severity
+       FROM transaction_features tf
+       JOIN transactions t ON t.id = tf.transaction_id
+       JOIN users u ON u.id = tf.user_id
+       JOIN merchants m ON m.id = tf.merchant_id
+       JOIN fraud_scores fs ON fs.transaction_id = tf.transaction_id
+       WHERE tf.transaction_id = $1`,
+      [req.params.id]
+    );
+    if (!result.rowCount) return res.status(404).json({ error: "features_not_found" });
+    res.json(result.rows[0]);
+  });
+
+  app.get("/metrics/model", async (_req, res) => {
+    const result = await query(
+      `WITH classified AS (
+        SELECT t.is_fraud_ground_truth AS actual, COALESCE(fs.score >= 55, false) AS predicted
+        FROM transactions t LEFT JOIN fraud_scores fs ON fs.transaction_id = t.id
+      )
+      SELECT
+        count(*) FILTER (WHERE actual AND predicted) AS tp,
+        count(*) FILTER (WHERE NOT actual AND predicted) AS fp,
+        count(*) FILTER (WHERE NOT actual AND NOT predicted) AS tn,
+        count(*) FILTER (WHERE actual AND NOT predicted) AS fn
+      FROM classified`
+    );
+    const row = result.rows[0];
+    const tp = Number(row.tp), fp = Number(row.fp), tn = Number(row.tn), fn = Number(row.fn);
+    const precision = tp + fp === 0 ? 0 : tp / (tp + fp);
+    const recall = tp + fn === 0 ? 0 : tp / (tp + fn);
+    const f1Score = precision + recall === 0 ? 0 : (2 * precision * recall) / (precision + recall);
+    res.json({
+      precision,
+      recall,
+      f1Score,
+      falsePositiveRate: fp + tn === 0 ? 0 : fp / (fp + tn),
+      truePositiveRate: recall,
+      confusionMatrix: { truePositive: tp, falsePositive: fp, trueNegative: tn, falseNegative: fn }
+    });
+  });
+
+  app.get("/models/hybrid", async (_req, res) => {
+    const model = await query(
+      "SELECT id, version, parameters, metrics, active, created_at FROM model_versions WHERE active = true ORDER BY created_at DESC LIMIT 1"
+    );
+    const summary = await query(
+      `SELECT
+        count(*) AS scored_count,
+        COALESCE(avg(rule_score), 0) AS avg_rule_score,
+        COALESCE(avg(ml_score), 0) AS avg_ml_score,
+        COALESCE(avg(blended_score), 0) AS avg_blended_score,
+        COALESCE(avg(model_probability), 0) AS avg_model_probability,
+        count(*) FILTER (WHERE ml_score >= 70) AS high_ml_count,
+        count(*) FILTER (WHERE abs(COALESCE(ml_score, score) - COALESCE(rule_score, score)) >= 25) AS disagreement_count
+       FROM fraud_scores
+       WHERE created_at >= now() - interval '24 hours'`
+    );
+    const recent = await query(
+      `SELECT fs.transaction_id, fs.rule_score, fs.ml_score, fs.blended_score, fs.model_probability,
+        fs.score, fs.severity, t.amount, t.currency, u.full_name, m.name AS merchant_name
+       FROM fraud_scores fs
+       JOIN transactions t ON t.id = fs.transaction_id
+       JOIN users u ON u.id = t.user_id
+       JOIN merchants m ON m.id = t.merchant_id
+       ORDER BY abs(COALESCE(fs.ml_score, fs.score) - COALESCE(fs.rule_score, fs.score)) DESC NULLS LAST, fs.created_at DESC
+       LIMIT 25`
+    );
+    res.json({ activeModel: model.rows[0] ?? null, ...summary.rows[0], topDisagreements: recent.rows });
+  });
+
+  app.get("/models/drift", async (_req, res) => {
+    const result = await query(
+      `WITH current_window AS (
+        SELECT * FROM transaction_features WHERE created_at >= now() - interval '1 hour'
+      ), baseline_window AS (
+        SELECT * FROM transaction_features WHERE created_at >= now() - interval '25 hours' AND created_at < now() - interval '1 hour'
+      ), current_stats AS (
+        SELECT
+          COALESCE(avg(velocity_5m), 0) AS velocity_5m,
+          COALESCE(avg(amount_zscore), 0) AS amount_zscore,
+          COALESCE(avg(geo_kmh), 0) AS geo_kmh,
+          COALESCE(avg(merchant_risk), 0) AS merchant_risk,
+          COALESCE(avg(CASE WHEN device_seen THEN 0 ELSE 1 END), 0) AS new_device_rate
+        FROM current_window
+      ), baseline_stats AS (
+        SELECT
+          COALESCE(avg(velocity_5m), 0) AS velocity_5m,
+          COALESCE(avg(amount_zscore), 0) AS amount_zscore,
+          COALESCE(avg(geo_kmh), 0) AS geo_kmh,
+          COALESCE(avg(merchant_risk), 0) AS merchant_risk,
+          COALESCE(avg(CASE WHEN device_seen THEN 0 ELSE 1 END), 0) AS new_device_rate
+        FROM baseline_window
+      ), counts AS (
+        SELECT
+          (SELECT count(*) FROM current_window) AS current_count,
+          (SELECT count(*) FROM baseline_window) AS baseline_count
+      )
+      SELECT row_to_json(current_stats.*) AS current, row_to_json(baseline_stats.*) AS baseline, counts.*
+      FROM current_stats, baseline_stats, counts`
+    );
+    const row = result.rows[0];
+    const current = row.current ?? {};
+    const baseline = row.baseline ?? {};
+    const features = ["velocity_5m", "amount_zscore", "geo_kmh", "merchant_risk", "new_device_rate"];
+    const drift = features.map(feature => {
+      const currentValue = Number(current[feature] ?? 0);
+      const baselineValue = Number(baseline[feature] ?? 0);
+      const absoluteDelta = currentValue - baselineValue;
+      const relativeDelta = baselineValue === 0 ? (currentValue === 0 ? 0 : 1) : absoluteDelta / Math.abs(baselineValue);
+      const severity = Math.abs(relativeDelta) >= 0.5 ? "high" : Math.abs(relativeDelta) >= 0.2 ? "medium" : "low";
+      return { feature, currentValue, baselineValue, absoluteDelta, relativeDelta, severity };
+    });
+    const driftIndex = drift.reduce((sum, item) => sum + Math.min(Math.abs(item.relativeDelta), 2), 0) / Math.max(drift.length, 1);
+    res.json({
+      currentCount: Number(row.current_count),
+      baselineCount: Number(row.baseline_count),
+      driftIndex,
+      status: driftIndex >= 0.5 ? "high" : driftIndex >= 0.2 ? "medium" : "low",
+      drift
+    });
+  });
+
+  app.post("/models/recalibrate", security.requireAuth("admin"), async (req, res, next) => {
+    try {
+      const body = z.object({
+        actor: z.string().min(2).default("demo-mlops"),
+        blendRuleWeight: z.number().min(0.05).max(0.95).optional()
+      }).parse(req.body ?? {});
+      const metrics = await query(
+        `WITH classified AS (
+          SELECT t.is_fraud_ground_truth AS actual, COALESCE(fs.score >= 55, false) AS predicted
+          FROM transactions t JOIN fraud_scores fs ON fs.transaction_id = t.id
+          WHERE fs.created_at >= now() - interval '24 hours'
+        )
+        SELECT
+          count(*) FILTER (WHERE actual AND predicted) AS tp,
+          count(*) FILTER (WHERE NOT actual AND predicted) AS fp,
+          count(*) FILTER (WHERE NOT actual AND NOT predicted) AS tn,
+          count(*) FILTER (WHERE actual AND NOT predicted) AS fn
+        FROM classified`
+      );
+      const row = metrics.rows[0];
+      const tp = Number(row.tp), fp = Number(row.fp), tn = Number(row.tn), fn = Number(row.fn);
+      const falsePositiveRate = fp + tn === 0 ? 0 : fp / (fp + tn);
+      const falseNegativeRate = fn + tp === 0 ? 0 : fn / (fn + tp);
+      const blendRuleWeight = body.blendRuleWeight ?? Math.max(0.45, Math.min(0.8, 0.62 + falsePositiveRate * 0.12 - falseNegativeRate * 0.08));
+      const active = await query("SELECT parameters FROM model_versions WHERE active = true ORDER BY created_at DESC LIMIT 1");
+      const previous = active.rows[0]?.parameters ?? {};
+      const parameters = {
+        ...previous,
+        blendRuleWeight,
+        recalibratedAt: new Date().toISOString(),
+        recalibrationBasis: { falsePositiveRate, falseNegativeRate, tp, fp, tn, fn }
+      };
+      await query("UPDATE model_versions SET active = false");
+      const version = `hybrid-logit-v${Date.now()}`;
+      const inserted = await query(
+        "INSERT INTO model_versions (version, parameters, metrics, active) VALUES ($1,$2,$3,true) RETURNING *",
+        [version, parameters, { falsePositiveRate, falseNegativeRate, tp, fp, tn, fn }]
+      );
+      await query(
+        "INSERT INTO audit_logs (actor, action, entity_type, entity_id, payload) VALUES ($1,'model_recalibrated','model_version',$2,$3)",
+        [body.actor, version, { parameters }]
+      );
+      res.status(201).json(inserted.rows[0]);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/models/train", security.requireAuth("admin"), async (req, res, next) => {
+    try {
+      const body = z.object({
+        actor: z.string().min(2).default("demo-mlops"),
+        maxSamples: z.number().int().min(100).max(50000).default(50000),
+        blendRuleWeight: z.number().min(0.05).max(0.95).default(0.48)
+      }).parse(req.body ?? {});
+      const rows = await query<TrainingRow>(
+        `WITH latest_decision AS (
+          SELECT DISTINCT ON (rd.alert_id) rd.alert_id, rd.decision
+          FROM review_decisions rd
+          ORDER BY rd.alert_id, rd.created_at DESC
+        )
+        SELECT
+          CASE
+            WHEN ld.decision = 'confirmed_fraud' THEN true
+            WHEN ld.decision = 'false_positive' THEN false
+            ELSE t.is_fraud_ground_truth
+          END AS actual,
+          COALESCE(fs.rule_score, fs.score, 0) AS rule_score,
+          tf.velocity_5m,
+          tf.velocity_1h,
+          tf.user_tx_30d,
+          tf.amount_zscore,
+          tf.geo_kmh,
+          tf.merchant_risk,
+          tf.device_seen
+        FROM transaction_features tf
+        JOIN transactions t ON t.id = tf.transaction_id
+        LEFT JOIN fraud_scores fs ON fs.transaction_id = tf.transaction_id
+        LEFT JOIN fraud_alerts fa ON fa.transaction_id = tf.transaction_id
+        LEFT JOIN latest_decision ld ON ld.alert_id = fa.id
+        ORDER BY tf.created_at DESC
+        LIMIT $1`,
+        [body.maxSamples]
+      );
+      const trained = trainFraudLogisticModel(rows.rows.map(toTrainingSample), {
+        blendRuleWeight: body.blendRuleWeight
+      });
+      await query("UPDATE model_versions SET active = false");
+      const version = `trained-logit-v${Date.now()}`;
+      const inserted = await query(
+        "INSERT INTO model_versions (version, parameters, metrics, active) VALUES ($1,$2,$3,true) RETURNING *",
+        [version, trained.parameters, trained.metrics]
+      );
+      await query(
+        "INSERT INTO audit_logs (actor, action, entity_type, entity_id, payload) VALUES ($1,'model_trained','model_version',$2,$3)",
+        [body.actor, version, { metrics: trained.metrics }]
+      );
+      res.status(201).json(inserted.rows[0]);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/graph/rings", async (req, res) => {
+    const lookbackHours = Math.min(Math.max(Number(req.query.lookbackHours ?? 24), 1), 168);
+    const minScore = Math.min(Math.max(Number(req.query.minScore ?? 55), 1), 99);
+    const result = await query<SuspiciousTransactionRow>(
+      `SELECT
+        t.id AS transaction_id,
+        t.user_id,
+        t.card_id,
+        t.merchant_id,
+        u.full_name AS user_name,
+        m.name AS merchant_name,
+        t.device_fingerprint,
+        t.ip_address::text AS ip_address,
+        fs.score,
+        fs.severity,
+        t.amount,
+        t.occurred_at
+       FROM transactions t
+       JOIN fraud_scores fs ON fs.transaction_id = t.id
+       JOIN users u ON u.id = t.user_id
+       JOIN merchants m ON m.id = t.merchant_id
+       WHERE fs.score >= $1
+         AND t.occurred_at >= now() - ($2 || ' hours')::interval
+       ORDER BY fs.score DESC, t.occurred_at DESC
+       LIMIT 700`,
+      [minScore, lookbackHours]
+    );
+    res.json(buildFraudRingGraph(result.rows, lookbackHours));
+  });
+
+  app.get("/admin/overview", async (_req, res) => {
+    const result = await query(
+      `SELECT
+        (SELECT count(*) FROM transactions WHERE created_at > now() - interval '1 hour') AS tx_1h,
+        (SELECT count(*) FROM fraud_alerts WHERE created_at > now() - interval '1 hour') AS alerts_1h,
+        (SELECT count(*) FROM fraud_alerts WHERE status = 'pending') AS pending_reviews,
+        (SELECT COALESCE(avg(latency_ms), 0) FROM fraud_scores WHERE created_at > now() - interval '1 hour') AS avg_latency_ms`
+    );
+    const counts = await scoringQueue.getJobCounts("waiting", "active", "failed", "delayed");
+    res.json({ ...result.rows[0], queue: counts });
+  });
+
+  app.get("/reports/alerts.csv", security.requireAuth("analyst"), async (req, res) => {
+    const lookbackHours = Math.min(Math.max(Number(req.query.lookbackHours ?? 24), 1), 720);
+    const result = await query(
+      `SELECT fa.id, fa.created_at, fa.status, fa.severity, fa.score, fa.confidence,
+        COALESCE(fa.assigned_to, 'unassigned') AS assigned_to,
+        u.full_name, m.name AS merchant_name, m.category AS merchant_category,
+        t.amount, t.currency, t.channel, t.is_fraud_ground_truth
+       FROM fraud_alerts fa
+       JOIN users u ON u.id = fa.user_id
+       JOIN merchants m ON m.id = fa.merchant_id
+       JOIN transactions t ON t.id = fa.transaction_id
+       WHERE fa.created_at >= now() - ($1 || ' hours')::interval
+       ORDER BY fa.created_at DESC
+       LIMIT 5000`,
+      [lookbackHours]
+    );
+    const columns = [
+      "id", "created_at", "status", "severity", "score", "confidence", "assigned_to",
+      "full_name", "merchant_name", "merchant_category", "amount", "currency", "channel", "is_fraud_ground_truth"
+    ];
+    await query(
+      "INSERT INTO audit_logs (actor, action, entity_type, entity_id, payload) VALUES ($1,'report_exported','report','alerts_csv',$2)",
+      [req.auth?.actor ?? "unknown", { lookbackHours, rowCount: result.rowCount }]
+    );
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="fraudpulse-alerts-${lookbackHours}h.csv"`);
+    res.send(toCsv(result.rows, columns));
+  });
+
+  app.get("/reports/model.json", security.requireAuth("analyst"), async (req, res) => {
+    const [metrics, hybrid, drift] = await Promise.all([
+      query(
+        `WITH classified AS (
+          SELECT t.is_fraud_ground_truth AS actual, COALESCE(fs.score >= 55, false) AS predicted
+          FROM transactions t LEFT JOIN fraud_scores fs ON fs.transaction_id = t.id
+        )
+        SELECT
+          count(*) FILTER (WHERE actual AND predicted) AS tp,
+          count(*) FILTER (WHERE NOT actual AND predicted) AS fp,
+          count(*) FILTER (WHERE NOT actual AND NOT predicted) AS tn,
+          count(*) FILTER (WHERE actual AND NOT predicted) AS fn
+        FROM classified`
+      ),
+      query("SELECT version, parameters, metrics, created_at FROM model_versions WHERE active = true ORDER BY created_at DESC LIMIT 1"),
+      query(
+        `SELECT
+          count(*) AS feature_count,
+          COALESCE(avg(velocity_5m), 0) AS avg_velocity_5m,
+          COALESCE(avg(amount_zscore), 0) AS avg_amount_zscore,
+          COALESCE(avg(geo_kmh), 0) AS avg_geo_kmh,
+          COALESCE(avg(merchant_risk), 0) AS avg_merchant_risk
+         FROM transaction_features
+         WHERE created_at >= now() - interval '24 hours'`
+      )
+    ]);
+    const row = metrics.rows[0];
+    const tp = Number(row.tp), fp = Number(row.fp), tn = Number(row.tn), fn = Number(row.fn);
+    const precision = tp + fp === 0 ? 0 : tp / (tp + fp);
+    const recall = tp + fn === 0 ? 0 : tp / (tp + fn);
+    const exported = {
+      generatedAt: new Date().toISOString(),
+      exportedBy: req.auth?.actor,
+      model: hybrid.rows[0] ?? null,
+      metrics: {
+        precision,
+        recall,
+        f1Score: precision + recall === 0 ? 0 : (2 * precision * recall) / (precision + recall),
+        falsePositiveRate: fp + tn === 0 ? 0 : fp / (fp + tn),
+        truePositiveRate: recall,
+        confusionMatrix: { truePositive: tp, falsePositive: fp, trueNegative: tn, falseNegative: fn }
+      },
+      featureWindow24h: drift.rows[0] ?? null
+    };
+    await query(
+      "INSERT INTO audit_logs (actor, action, entity_type, entity_id, payload) VALUES ($1,'report_exported','report','model_json',$2)",
+      [req.auth?.actor ?? "unknown", { version: exported.model?.version }]
+    );
+    res.json(exported);
+  });
+
+  app.post("/internal/broadcast", security.requireAuth("service"), (req, res) => {
+    const event = z.enum(["transaction_scored", "fraud_alert_created", "scoring_failed_dead_letter"]).parse(req.body.event);
+    if (event === "fraud_alert_created") alertCount.inc({ severity: String(req.body.payload?.severity ?? "unknown") });
+    io.emit(event, req.body.payload);
+    res.json({ status: "broadcasted" });
+  });
+
+  app.get("/simulator/state", (_req, res) => {
+    res.json({ running: simulatorRunning });
+  });
+
+  app.get("/simulator/scenarios", (_req, res) => {
+    res.json(scenarios);
+  });
+
+  app.post("/simulator/scenarios/:id/run", security.requireAuth("admin"), async (req, res, next) => {
+    try {
+      const scenarioId = z.enum(["card_testing_burst", "impossible_travel", "account_takeover"]).parse(req.params.id);
+      const body = z.object({
+        userId: z.string().uuid().optional(),
+        actor: z.string().min(2).default("demo-operator")
+      }).parse(req.body ?? {});
+      const accountResult = await query<DemoAccount>(
+        `SELECT u.id AS user_id, c.id AS card_id, u.home_latitude, u.home_longitude, u.baseline_daily_amount
+         FROM users u
+         JOIN cards c ON c.user_id = u.id
+         WHERE ($1::uuid IS NULL OR u.id = $1)
+         ORDER BY u.created_at
+         LIMIT 1`,
+        [body.userId ?? null]
+      );
+      const merchantResult = await query<DemoMerchant>(
+        "SELECT id, name, category, risk_score, latitude, longitude FROM merchants ORDER BY risk_score DESC"
+      );
+      if (!accountResult.rowCount) return res.status(404).json({ error: "demo_account_not_found" });
+      if (!merchantResult.rowCount) return res.status(404).json({ error: "demo_merchants_not_found" });
+      const transactions = buildScenarioTransactions(scenarioId, accountResult.rows[0], merchantResult.rows);
+      const ids: string[] = [];
+      for (const transaction of transactions) {
+        ids.push(await createTransaction(transaction, `scenario:${scenarioId}`));
+      }
+      await query(
+        "INSERT INTO audit_logs (actor, action, entity_type, entity_id, payload) VALUES ($1,'scenario_replay_started','scenario',$2,$3)",
+        [body.actor, scenarioId, { scenarioId, transactionCount: ids.length, transactionIds: ids }]
+      );
+      io.emit("scenario_replay_started", { scenarioId, transactionCount: ids.length });
+      res.status(202).json({ scenarioId, transactionCount: ids.length, transactionIds: ids });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/simulator/control", security.requireAuth("admin"), async (req, res) => {
+    const body = z.object({ action: z.enum(["pause", "resume"]) }).parse(req.body);
+    simulatorRunning = body.action === "resume";
+    io.emit("simulator_control", req.body);
+    res.json({ status: "control_broadcasted", running: simulatorRunning });
+  });
+
+  app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    logger.error({ err }, "request_failed");
+    if (err instanceof z.ZodError) return res.status(400).json({ error: "validation_failed", details: err.flatten() });
+    res.status(500).json({ error: "internal_error" });
+  });
+
+  return { app, server, io };
+};

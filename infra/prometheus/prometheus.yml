@@ -1,0 +1,10 @@
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: fraudpulse-api
+    static_configs:
+      - targets: ["api:4000"]
+  - job_name: fraudpulse-worker
+    static_configs:
+      - targets: ["worker:4100"]

@@ -1,0 +1,26 @@
+{
+  "name": "fraudpulse",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local real-time fraud detection system with streaming events, explainable scoring, and risk operations dashboard.",
+  "workspaces": [
+    "apps/*",
+    "services/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build -w @fraudpulse/shared && npm run build -w @fraudpulse/web && npm run build -w @fraudpulse/api && npm run build -w @fraudpulse/simulator && npm run build -w @fraudpulse/worker",
+    "dev:api": "npm run dev -w @fraudpulse/api",
+    "dev:worker": "npm run dev -w @fraudpulse/worker",
+    "dev:simulator": "npm run dev -w @fraudpulse/simulator",
+    "dev:web": "npm run dev -w @fraudpulse/web",
+    "test": "npm run test --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present",
+    "recalibrate": "npm run recalibrate -w @fraudpulse/worker",
+    "train:model": "npm run train:model -w @fraudpulse/worker"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}
