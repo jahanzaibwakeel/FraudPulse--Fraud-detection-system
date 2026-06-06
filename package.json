@@ -16,6 +16,8 @@
     "dev:web": "npm run dev -w @fraudpulse/web",
     "test": "npm run test --workspaces --if-present",
     "lint": "npm run lint --workspaces --if-present",
+    "smoke": "node scripts/smoke-test.mjs",
+    "screenshots": "node scripts/capture-screenshots.mjs",
     "recalibrate": "npm run recalibrate -w @fraudpulse/worker",
     "train:model": "npm run train:model -w @fraudpulse/worker"
   },

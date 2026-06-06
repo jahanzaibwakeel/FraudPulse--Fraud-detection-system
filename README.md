@@ -52,6 +52,18 @@ Run tests:
 npm test
 ```
 
+Run deployment smoke checks against Docker Compose:
+
+```bash
+npm run smoke
+```
+
+Capture current dashboard screenshots:
+
+```bash
+npm run screenshots
+```
+
 Run the recalibration script:
 
 ```bash
@@ -164,6 +176,10 @@ Round 13 adds a local model benchmark suite. FraudPulse evaluates the same featu
 
 Round 14 upgrades the local security layer with hashed API-token matching, constant-time comparisons, expiring local sessions, session revocation, failed-auth lockouts, request IDs, restricted CORS and Socket.IO origins, security event telemetry, and token rotation planning. The system remains fully local and free while showing the controls a fraud operations API would need before deployment.
 
+## Deployment Polish
+
+Round 15 adds the final repo presentation layer: GitHub Actions CI, Docker smoke checks, dashboard screenshot capture, a deployment guide, and a demo walkthrough. The CI workflow builds and tests the TypeScript workspaces, validates Docker Compose, runs the local stack, executes smoke checks, runs Playwright against the dashboard, and uploads screenshots as artifacts.
+
 ## Round Roadmap
 
 Completed:
@@ -182,14 +198,18 @@ Completed:
 - Round 12: Advanced simulation lab for configurable fraud campaigns
 - Round 13: Real model benchmarking across multiple local algorithms
 - Round 14: Security hardening V2 with local sessions, lockouts, request IDs, and key rotation planning
+- Round 15: Deployment polish with CI, smoke checks, screenshots, and demo walkthrough
 
 Remaining:
 
-- Round 15: Deployment polish with CI, screenshots, and demo walkthrough
+- None. FraudPulse is complete through the planned roadmap.
 
 ## Documentation
 
 - API documentation: [docs/api.md](docs/api.md)
 - Case study: [docs/case-study.md](docs/case-study.md)
+- Deployment guide: [docs/deployment.md](docs/deployment.md)
+- Demo walkthrough: [docs/demo-walkthrough.md](docs/demo-walkthrough.md)
+- Screenshots: [docs/screenshots](docs/screenshots)
 - SQL schema: [infra/db/migrations/001_init.sql](infra/db/migrations/001_init.sql)
 - Grafana dashboard: [infra/grafana/dashboards/fraudpulse.json](infra/grafana/dashboards/fraudpulse.json)

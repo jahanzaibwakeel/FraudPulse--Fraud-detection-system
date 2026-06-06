@@ -85,6 +85,10 @@ The fifth round adds local role-based API tokens, protected Socket.IO connection
 
 The fourteenth round deepens the local security model. FraudPulse now hashes configured API tokens, compares credentials in constant time, issues expiring local session tokens, tracks failed authentication attempts, creates short lockouts, restricts browser origins, and attaches request IDs to API responses. The Security page exposes active sessions, lockouts, security events, and a token rotation plan that generates replacement `.env` lines without using a paid vault.
 
+## Deployment Polish
+
+The fifteenth round packages the system for review. GitHub Actions validates dependencies, Docker Compose, tests, builds, smoke checks, Playwright E2E, and screenshot capture. The deployment guide gives operators a repeatable local production checklist, while the demo walkthrough gives recruiters a concise story through live monitoring, fraud simulation, alert investigation, model governance, operations, security, and architecture.
+
 ## Metrics and Feedback
 
 The API calculates precision, recall, F1, confusion matrix, false positive rate, and true positive rate from synthetic ground truth and scored predictions. Review decisions are captured as feedback for the recalibration script. Prometheus collects throughput, alert count, queue depth, scoring latency, confirmed fraud, and false positives, while Grafana provides an operations view.
