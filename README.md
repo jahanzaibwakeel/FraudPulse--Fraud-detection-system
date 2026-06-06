@@ -136,6 +136,10 @@ Or use the Model Metrics dashboard button to train from the running Docker app.
 
 Round 7 adds trained-model feature contribution explanations. Each ML-driven alert records the model kind, probability, linear score, rule/blended score, and the top feature contributions that raised or lowered risk. Alert details show these contributions for case review, and the model dashboard aggregates the strongest feature drivers from recent alerts.
 
+## Model Registry
+
+Round 8 adds champion/challenger model governance. The Model Registry page lists all local model versions, identifies the active champion, recommends an inactive challenger, runs shadow scoring against recent feature-store rows, and allows admin promotion or rollback without deleting model history.
+
 ## Round Roadmap
 
 Completed:
@@ -147,10 +151,10 @@ Completed:
 - Round 5: Production hardening with auth, security, reports, and E2E tests
 - Round 6: Real trained local fraud model
 - Round 7: Model explainability with per-feature trained-model contributions
+- Round 8: Model registry with champion/challenger promotion and rollback
 
 Remaining:
 
-- Round 8: Model registry with champion/challenger promotion and rollback
 - Round 9: Entity risk memory for users, cards, devices, IPs, and merchants
 - Round 10: Case investigation workspace with evidence bundles
 - Round 11: Data quality checks and drift alerting

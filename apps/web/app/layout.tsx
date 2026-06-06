@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { Activity, Bell, BriefcaseBusiness, Database, Gauge, LockKeyhole, Network, RadioTower, ShieldCheck, SlidersHorizontal } from "lucide-react";
+import { Activity, Bell, BriefcaseBusiness, Database, Gauge, LockKeyhole, Network, RadioTower, ShieldCheck, SlidersHorizontal, Trophy } from "lucide-react";
 import Link from "next/link";
 import "./styles.css";
 
@@ -15,6 +15,7 @@ const nav = [
   { href: "/rings", label: "Ring Graph", icon: Network },
   { href: "/features", label: "Feature Store", icon: Database },
   { href: "/performance", label: "Model Metrics", icon: Gauge },
+  { href: "/models", label: "Model Registry", icon: Trophy },
   { href: "/metrics", label: "System Metrics", icon: Activity },
   { href: "/security", label: "Security", icon: LockKeyhole },
   { href: "/rules", label: "Rules", icon: SlidersHorizontal }

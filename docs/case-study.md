@@ -53,6 +53,10 @@ The sixth round upgrades the hand-tuned hybrid layer with a true local training 
 
 The seventh round adds per-feature contribution explanations for the trained model. Every ML-driven alert carries the top features that raised or lowered fraud probability, including raw values, normalized values, coefficients, and contribution strength. This keeps the local model auditable and gives analysts a reasoned bridge between deterministic rules and learned model behavior.
 
+## Model Registry and Champion/Challenger
+
+The eighth round adds model governance around the existing `model_versions` table. FraudPulse treats the active model as the production champion and inactive versions as challengers. Analysts can shadow-score a challenger against recent feature-store rows to compare precision, recall, F1, alert volume, and disagreement rate before an admin promotes it. Promotion flips the active model and writes an audit event, preserving rollback history.
+
 ## Production Hardening
 
 The final round adds local role-based API tokens, protected Socket.IO connections, service tokens for simulator/worker traffic, per-token rate limiting, audit-log inspection, and downloadable analyst reports. These controls keep the demo runnable on one laptop while showing production instincts: least-privilege mutation routes, operational exports, observable access patterns, and tests for rejected unauthorized access.

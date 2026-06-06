@@ -106,6 +106,9 @@ Case note:
 - `GET /features/transactions/:id` returns the feature snapshot for one transaction.
 - `GET /metrics/model` returns precision, recall, F1, confusion matrix, FPR, and TPR.
 - `GET /models/hybrid` returns active model settings, rule/ML/blended score summaries, disagreements, and aggregated trained-model feature drivers.
+- `GET /models/registry` lists champion and challenger model versions.
+- `POST /models/:id/shadow-score` compares a model against the active champion on recent feature-store rows. Requires analyst.
+- `POST /models/:id/promote` promotes a model version to champion. Requires admin.
 - `GET /models/drift` returns current-vs-baseline feature drift.
 - `POST /models/recalibrate` creates a new active local model version.
 - `POST /models/train` trains and activates a local logistic regression model from feature-store history. Requires admin.

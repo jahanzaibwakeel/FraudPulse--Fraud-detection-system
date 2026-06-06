@@ -37,6 +37,27 @@ type TrainingRow = {
   device_seen: boolean;
 };
 
+type RegistryModelRow = {
+  id: string;
+  version: string;
+  parameters: Record<string, unknown>;
+  metrics: Record<string, unknown>;
+  active: boolean;
+  created_at: string;
+};
+
+type ShadowFeatureRow = {
+  actual: boolean;
+  rule_score: string | number | null;
+  velocity_5m: string | number;
+  velocity_1h: string | number;
+  user_tx_30d: string | number;
+  amount_zscore: string | number;
+  geo_kmh: string | number;
+  merchant_risk: string | number;
+  device_seen: boolean;
+};
+
 const toTrainingSample = (row: TrainingRow): FraudTrainingSample => ({
   actual: row.actual,
   ruleScore: Number(row.rule_score ?? 0),
@@ -50,6 +71,70 @@ const toTrainingSample = (row: TrainingRow): FraudTrainingSample => ({
     deviceSeen: row.device_seen
   }
 });
+
+const modelFeatureNames = ["velocity5m", "velocity1h", "amountZscore", "geoKmh", "merchantRisk", "newDevice", "userTx30d"];
+
+const sigmoid = (value: number) => {
+  if (value < -35) return 0;
+  if (value > 35) return 1;
+  return 1 / (1 + Math.exp(-value));
+};
+
+const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
+
+const featureValue = (row: ShadowFeatureRow, feature: string) => {
+  if (feature === "newDevice") return row.device_seen ? 0 : 1;
+  if (feature === "velocity5m") return Math.min(Math.max(Number(row.velocity_5m), 0), 100);
+  if (feature === "velocity1h") return Math.min(Math.max(Number(row.velocity_1h), 0), 400);
+  if (feature === "amountZscore") return clamp(Number(row.amount_zscore), -5, 8);
+  if (feature === "geoKmh") return Math.min(Math.max(Number(row.geo_kmh), 0), 2500);
+  if (feature === "merchantRisk") return clamp(Number(row.merchant_risk), 0, 100);
+  return Math.min(Math.max(Number(row.user_tx_30d), 0), 150);
+};
+
+const scoreModelVersion = (model: RegistryModelRow, row: ShadowFeatureRow) => {
+  const parameters = model.parameters ?? {};
+  const coefficients = parameters.coefficients as Record<string, number> | undefined;
+  const normalization = parameters.normalization as Record<string, { mean: number; scale: number }> | undefined;
+  const featureNames = Array.isArray(parameters.featureNames) ? parameters.featureNames.map(String) : modelFeatureNames;
+  const bias = Number(coefficients?.bias ?? -2.35);
+  const linear = featureNames.reduce((sum, feature) => {
+    const raw = featureValue(row, feature);
+    const stats = normalization?.[feature];
+    const value = stats ? (raw - Number(stats.mean ?? 0)) / Math.max(Number(stats.scale ?? 1), 0.0001) : raw;
+    return sum + Number(coefficients?.[feature] ?? 0) * value;
+  }, bias);
+  const probability = sigmoid(linear);
+  const mlScore = clamp(probability * 100, 0, 99);
+  const blendRuleWeight = clamp(Number(parameters.blendRuleWeight ?? 0.62), 0.05, 0.95);
+  const ruleScore = Number(row.rule_score ?? 0);
+  return {
+    probability,
+    mlScore,
+    blendedScore: clamp(ruleScore * blendRuleWeight + mlScore * (1 - blendRuleWeight), 0, 99)
+  };
+};
+
+const metricSummary = (predictions: Array<{ actual: boolean; predicted: boolean }>) => {
+  const matrix = { truePositive: 0, falsePositive: 0, trueNegative: 0, falseNegative: 0 };
+  for (const prediction of predictions) {
+    if (prediction.actual && prediction.predicted) matrix.truePositive += 1;
+    else if (!prediction.actual && prediction.predicted) matrix.falsePositive += 1;
+    else if (!prediction.actual && !prediction.predicted) matrix.trueNegative += 1;
+    else matrix.falseNegative += 1;
+  }
+  const { truePositive: tp, falsePositive: fp, trueNegative: tn, falseNegative: fn } = matrix;
+  const precision = tp + fp === 0 ? 0 : tp / (tp + fp);
+  const recall = tp + fn === 0 ? 0 : tp / (tp + fn);
+  return {
+    precision,
+    recall,
+    f1Score: precision + recall === 0 ? 0 : (2 * precision * recall) / (precision + recall),
+    falsePositiveRate: fp + tn === 0 ? 0 : fp / (fp + tn),
+    truePositiveRate: recall,
+    confusionMatrix: matrix
+  };
+};
 
 export const createApp = () => {
   const app = express();
@@ -725,6 +810,122 @@ export const createApp = () => {
       topDisagreements: recent.rows,
       topModelContributions: contributions.rows
     });
+  });
+
+  app.get("/models/registry", async (_req, res) => {
+    const models = await query<RegistryModelRow>(
+      `SELECT id, version, parameters, metrics, active, created_at
+       FROM model_versions
+       ORDER BY active DESC, created_at DESC
+       LIMIT 60`
+    );
+    const champion = models.rows.find(model => model.active) ?? null;
+    const challengers = models.rows.filter(model => !model.active);
+    const recommendedChallenger = challengers.find(model => model.version.startsWith("trained-logit"))
+      ?? challengers[0]
+      ?? null;
+    res.json({
+      champion,
+      recommendedChallenger,
+      models: models.rows,
+      counts: {
+        total: models.rowCount,
+        trained: models.rows.filter(model => model.version.startsWith("trained-logit")).length,
+        challengers: challengers.length
+      }
+    });
+  });
+
+  app.post("/models/:id/promote", security.requireAuth("admin"), async (req, res, next) => {
+    try {
+      const body = z.object({ actor: z.string().min(2).default("demo-mlops") }).parse(req.body ?? {});
+      const target = await query<RegistryModelRow>(
+        "SELECT id, version, parameters, metrics, active, created_at FROM model_versions WHERE id = $1",
+        [req.params.id]
+      );
+      if (!target.rowCount) return res.status(404).json({ error: "model_not_found" });
+      const previous = await query<RegistryModelRow>(
+        "SELECT id, version FROM model_versions WHERE active = true ORDER BY created_at DESC LIMIT 1"
+      );
+      await query("UPDATE model_versions SET active = false");
+      const promoted = await query<RegistryModelRow>(
+        "UPDATE model_versions SET active = true WHERE id = $1 RETURNING id, version, parameters, metrics, active, created_at",
+        [req.params.id]
+      );
+      await query(
+        "INSERT INTO audit_logs (actor, action, entity_type, entity_id, payload) VALUES ($1,'model_promoted','model_version',$2,$3)",
+        [body.actor, req.params.id, { previousChampion: previous.rows[0] ?? null, promoted: promoted.rows[0] }]
+      );
+      res.json({ previousChampion: previous.rows[0] ?? null, champion: promoted.rows[0] });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/models/:id/shadow-score", security.requireAuth("analyst"), async (req, res, next) => {
+    try {
+      const body = z.object({
+        sampleSize: z.number().int().min(50).max(10000).default(2000),
+        alertThreshold: z.number().min(1).max(99).default(55)
+      }).parse(req.body ?? {});
+      const [candidateResult, championResult, sampleResult] = await Promise.all([
+        query<RegistryModelRow>(
+          "SELECT id, version, parameters, metrics, active, created_at FROM model_versions WHERE id = $1",
+          [req.params.id]
+        ),
+        query<RegistryModelRow>(
+          "SELECT id, version, parameters, metrics, active, created_at FROM model_versions WHERE active = true ORDER BY created_at DESC LIMIT 1"
+        ),
+        query<ShadowFeatureRow>(
+          `SELECT t.is_fraud_ground_truth AS actual,
+            COALESCE(fs.rule_score, fs.score, 0) AS rule_score,
+            tf.velocity_5m,
+            tf.velocity_1h,
+            tf.user_tx_30d,
+            tf.amount_zscore,
+            tf.geo_kmh,
+            tf.merchant_risk,
+            tf.device_seen
+           FROM transaction_features tf
+           JOIN transactions t ON t.id = tf.transaction_id
+           LEFT JOIN fraud_scores fs ON fs.transaction_id = tf.transaction_id
+           ORDER BY tf.created_at DESC
+           LIMIT $1`,
+          [body.sampleSize]
+        )
+      ]);
+      if (!candidateResult.rowCount) return res.status(404).json({ error: "model_not_found" });
+      if (!championResult.rowCount) return res.status(409).json({ error: "champion_model_missing" });
+      const candidate = candidateResult.rows[0];
+      const champion = championResult.rows[0];
+      const pairs = sampleResult.rows.map(row => {
+        const candidateScore = scoreModelVersion(candidate, row);
+        const championScore = scoreModelVersion(champion, row);
+        return {
+          actual: row.actual,
+          candidateScore,
+          championScore,
+          candidatePredicted: candidateScore.blendedScore >= body.alertThreshold,
+          championPredicted: championScore.blendedScore >= body.alertThreshold
+        };
+      });
+      const candidateMetrics = metricSummary(pairs.map(pair => ({ actual: pair.actual, predicted: pair.candidatePredicted })));
+      const championMetrics = metricSummary(pairs.map(pair => ({ actual: pair.actual, predicted: pair.championPredicted })));
+      const disagreementCount = pairs.filter(pair => pair.candidatePredicted !== pair.championPredicted).length;
+      const candidateAlerts = pairs.filter(pair => pair.candidatePredicted).length;
+      const championAlerts = pairs.filter(pair => pair.championPredicted).length;
+      res.json({
+        sampleSize: sampleResult.rowCount,
+        alertThreshold: body.alertThreshold,
+        champion: { id: champion.id, version: champion.version, metrics: championMetrics, alerts: championAlerts },
+        candidate: { id: candidate.id, version: candidate.version, metrics: candidateMetrics, alerts: candidateAlerts },
+        alertDelta: candidateAlerts - championAlerts,
+        disagreementCount,
+        disagreementRate: sampleResult.rowCount ? disagreementCount / sampleResult.rowCount : 0
+      });
+    } catch (error) {
+      next(error);
+    }
   });
 
   app.get("/models/drift", async (_req, res) => {

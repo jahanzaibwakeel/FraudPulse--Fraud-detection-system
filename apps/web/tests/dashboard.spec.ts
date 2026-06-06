@@ -18,3 +18,10 @@ test("performance page exposes local model training", async ({ page }) => {
   await expect(page.getByRole("button", { name: /Train Local Model/i })).toBeVisible();
   await expect(page.getByText("Trained Model Feature Drivers")).toBeVisible();
 });
+
+test("model registry exposes champion challenger workflow", async ({ page }) => {
+  await page.goto("/models");
+  await expect(page.getByRole("heading", { name: "Model Registry" })).toBeVisible();
+  await expect(page.getByText("Model Versions")).toBeVisible();
+  await expect(page.getByRole("button", { name: /Shadow Score/i })).toBeVisible();
+});
