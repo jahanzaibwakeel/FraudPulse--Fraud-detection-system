@@ -116,6 +116,8 @@ Case note:
 - `GET /models/drift` returns current-vs-baseline feature drift.
 - `POST /models/recalibrate` creates a new active local model version.
 - `POST /models/train` trains and activates a local logistic regression model from feature-store history. Requires admin.
+- `GET /quality/overview` returns current data quality checks, open quality alerts, recent runs, and drift summary.
+- `POST /quality/run` persists a data quality run and opens or resolves quality alerts. Requires analyst.
 - `GET /graph/rings?lookbackHours=24&minScore=55` returns connected suspicious entity clusters.
 - `GET /admin/overview` returns dashboard rollups and queue counts.
 - `GET /reports/alerts.csv?lookbackHours=24` exports protected alert/case data. Requires analyst.

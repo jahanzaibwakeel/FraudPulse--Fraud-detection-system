@@ -39,3 +39,10 @@ test("alert detail opens case investigation workspace", async ({ page }) => {
   await expect(page.getByText("Evidence Bundle")).toBeVisible();
   await expect(page.getByText("Related Device Activity")).toBeVisible();
 });
+
+test("data quality page renders drift alert controls", async ({ page }) => {
+  await page.goto("/quality");
+  await expect(page.getByRole("heading", { name: "Data Quality" })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Run Checks/i })).toBeVisible();
+  await expect(page.getByText("Feature Drift Alerts")).toBeVisible();
+});

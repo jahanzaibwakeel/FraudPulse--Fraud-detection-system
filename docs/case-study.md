@@ -65,6 +65,10 @@ The ninth round adds persistent memory for risky entities. After every scored tr
 
 The tenth round turns each alert into an investigation package. A single case endpoint assembles transaction details, feature-store evidence, entity risk memory, related user/card/device/IP activity, merchant alert patterns, recommended actions, notes, reviews, and audit events. Analysts can save evidence snapshots to preserve the exact context they reviewed before confirming fraud or marking a false positive.
 
+## Data Quality and Drift Alerts
+
+The eleventh round adds operational trust checks around the fraud pipeline. FraudPulse continuously computes quality checks for unscored transactions, invalid values, missing entity links, feature-store gaps, orphan events, dead-letter events, delayed scoring, ingestion freshness, scoring lag, and feature drift. Quality runs are persisted, open alerts are deduplicated, and resolved checks close prior alerts. This shows how production fraud systems monitor the health of their inputs and model features, not only their predictions.
+
 ## Production Hardening
 
 The final round adds local role-based API tokens, protected Socket.IO connections, service tokens for simulator/worker traffic, per-token rate limiting, audit-log inspection, and downloadable analyst reports. These controls keep the demo runnable on one laptop while showing production instincts: least-privilege mutation routes, operational exports, observable access patterns, and tests for rejected unauthorized access.

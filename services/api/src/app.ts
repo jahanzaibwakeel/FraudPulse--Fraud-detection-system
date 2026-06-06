@@ -136,6 +136,58 @@ const metricSummary = (predictions: Array<{ actual: boolean; predicted: boolean 
   };
 };
 
+type DriftRow = {
+  current: Record<string, unknown>;
+  baseline: Record<string, unknown>;
+  current_count: string | number;
+  baseline_count: string | number;
+};
+
+type QualityCheck = {
+  code: string;
+  label: string;
+  status: "pass" | "warn" | "fail";
+  severity: "low" | "medium" | "high" | "critical";
+  value: number;
+  threshold: number;
+  description: string;
+  evidence: Record<string, unknown>;
+};
+
+const qualityStatus = (value: number, warn: number, fail: number) => {
+  if (value >= fail) return "fail" as const;
+  if (value >= warn) return "warn" as const;
+  return "pass" as const;
+};
+
+const qualitySeverity = (status: QualityCheck["status"], critical = false) => {
+  if (status === "fail") return critical ? "critical" : "high";
+  if (status === "warn") return "medium";
+  return "low";
+};
+
+const buildDriftSummary = (row: DriftRow) => {
+  const current = row.current ?? {};
+  const baseline = row.baseline ?? {};
+  const features = ["velocity_5m", "amount_zscore", "geo_kmh", "merchant_risk", "new_device_rate"];
+  const drift = features.map(feature => {
+    const currentValue = Number(current[feature] ?? 0);
+    const baselineValue = Number(baseline[feature] ?? 0);
+    const absoluteDelta = currentValue - baselineValue;
+    const relativeDelta = baselineValue === 0 ? (currentValue === 0 ? 0 : 1) : absoluteDelta / Math.abs(baselineValue);
+    const severity = Math.abs(relativeDelta) >= 0.5 ? "high" : Math.abs(relativeDelta) >= 0.2 ? "medium" : "low";
+    return { feature, currentValue, baselineValue, absoluteDelta, relativeDelta, severity };
+  });
+  const driftIndex = drift.reduce((sum, item) => sum + Math.min(Math.abs(item.relativeDelta), 2), 0) / Math.max(drift.length, 1);
+  return {
+    currentCount: Number(row.current_count),
+    baselineCount: Number(row.baseline_count),
+    driftIndex,
+    status: driftIndex >= 0.5 ? "high" : driftIndex >= 0.2 ? "medium" : "low",
+    drift
+  };
+};
+
 export const createApp = () => {
   const app = express();
   const server = http.createServer(app);
@@ -1223,7 +1275,7 @@ export const createApp = () => {
   });
 
   app.get("/models/drift", async (_req, res) => {
-    const result = await query(
+    const result = await query<DriftRow>(
       `WITH current_window AS (
         SELECT * FROM transaction_features WHERE created_at >= now() - interval '1 hour'
       ), baseline_window AS (
@@ -1252,26 +1304,193 @@ export const createApp = () => {
       SELECT row_to_json(current_stats.*) AS current, row_to_json(baseline_stats.*) AS baseline, counts.*
       FROM current_stats, baseline_stats, counts`
     );
-    const row = result.rows[0];
-    const current = row.current ?? {};
-    const baseline = row.baseline ?? {};
-    const features = ["velocity_5m", "amount_zscore", "geo_kmh", "merchant_risk", "new_device_rate"];
-    const drift = features.map(feature => {
-      const currentValue = Number(current[feature] ?? 0);
-      const baselineValue = Number(baseline[feature] ?? 0);
-      const absoluteDelta = currentValue - baselineValue;
-      const relativeDelta = baselineValue === 0 ? (currentValue === 0 ? 0 : 1) : absoluteDelta / Math.abs(baselineValue);
-      const severity = Math.abs(relativeDelta) >= 0.5 ? "high" : Math.abs(relativeDelta) >= 0.2 ? "medium" : "low";
-      return { feature, currentValue, baselineValue, absoluteDelta, relativeDelta, severity };
-    });
-    const driftIndex = drift.reduce((sum, item) => sum + Math.min(Math.abs(item.relativeDelta), 2), 0) / Math.max(drift.length, 1);
-    res.json({
-      currentCount: Number(row.current_count),
-      baselineCount: Number(row.baseline_count),
-      driftIndex,
-      status: driftIndex >= 0.5 ? "high" : driftIndex >= 0.2 ? "medium" : "low",
-      drift
-    });
+    res.json(buildDriftSummary(result.rows[0]));
+  });
+
+  const buildQualityOverview = async () => {
+    const [counts, freshness, eventLag, driftResult, activeAlerts, recentRuns] = await Promise.all([
+      query(
+        `SELECT
+          (SELECT count(*) FROM transactions) AS transactions_total,
+          (SELECT count(*) FROM transactions t LEFT JOIN fraud_scores fs ON fs.transaction_id = t.id
+            WHERE fs.id IS NULL AND t.created_at < now() - interval '90 seconds') AS unscored_transactions,
+          (SELECT count(*) FROM transactions WHERE amount <= 0 OR length(currency) <> 3) AS invalid_transactions,
+          (SELECT count(*) FROM transactions t
+            LEFT JOIN users u ON u.id = t.user_id
+            LEFT JOIN cards c ON c.id = t.card_id
+            LEFT JOIN merchants m ON m.id = t.merchant_id
+            WHERE u.id IS NULL OR c.id IS NULL OR m.id IS NULL) AS missing_entity_links,
+          (SELECT count(*) FROM fraud_scores fs LEFT JOIN transaction_features tf ON tf.transaction_id = fs.transaction_id
+            WHERE tf.transaction_id IS NULL) AS missing_feature_snapshots,
+          (SELECT count(*) FROM transaction_events te
+            WHERE te.transaction_id IS NOT NULL
+              AND NOT EXISTS (SELECT 1 FROM transactions t WHERE t.id = te.transaction_id)) AS orphan_events,
+          (SELECT count(*) FROM transaction_events WHERE event_type LIKE '%dead_letter%' OR error IS NOT NULL) AS dead_letter_events,
+          (SELECT count(*) FROM transaction_events te
+            WHERE te.event_type = 'transaction_created'
+              AND te.created_at < now() - interval '5 minutes'
+              AND NOT EXISTS (
+                SELECT 1 FROM transaction_events scored
+                WHERE scored.transaction_id = te.transaction_id AND scored.event_type = 'transaction_scored'
+              )) AS delayed_scoring_events`
+      ),
+      query(
+        `SELECT
+          COALESCE(EXTRACT(EPOCH FROM (now() - max(created_at))) / 60, 999999) AS latest_transaction_age_minutes,
+          COALESCE(EXTRACT(EPOCH FROM (now() - (max(created_at) FILTER (WHERE event_type = 'transaction_scored')))) / 60, 999999) AS latest_score_event_age_minutes
+         FROM transaction_events`
+      ),
+      query(
+        `SELECT COALESCE(avg(EXTRACT(EPOCH FROM (scored.created_at - created.created_at))), 0) AS avg_score_lag_seconds
+         FROM transaction_events created
+         JOIN transaction_events scored ON scored.transaction_id = created.transaction_id AND scored.event_type = 'transaction_scored'
+         WHERE created.event_type = 'transaction_created'
+           AND created.created_at >= now() - interval '1 hour'`
+      ),
+      query<DriftRow>(
+        `WITH current_window AS (
+          SELECT * FROM transaction_features WHERE created_at >= now() - interval '1 hour'
+        ), baseline_window AS (
+          SELECT * FROM transaction_features WHERE created_at >= now() - interval '25 hours' AND created_at < now() - interval '1 hour'
+        ), current_stats AS (
+          SELECT
+            COALESCE(avg(velocity_5m), 0) AS velocity_5m,
+            COALESCE(avg(amount_zscore), 0) AS amount_zscore,
+            COALESCE(avg(geo_kmh), 0) AS geo_kmh,
+            COALESCE(avg(merchant_risk), 0) AS merchant_risk,
+            COALESCE(avg(CASE WHEN device_seen THEN 0 ELSE 1 END), 0) AS new_device_rate
+          FROM current_window
+        ), baseline_stats AS (
+          SELECT
+            COALESCE(avg(velocity_5m), 0) AS velocity_5m,
+            COALESCE(avg(amount_zscore), 0) AS amount_zscore,
+            COALESCE(avg(geo_kmh), 0) AS geo_kmh,
+            COALESCE(avg(merchant_risk), 0) AS merchant_risk,
+            COALESCE(avg(CASE WHEN device_seen THEN 0 ELSE 1 END), 0) AS new_device_rate
+          FROM baseline_window
+        ), counts AS (
+          SELECT
+            (SELECT count(*) FROM current_window) AS current_count,
+            (SELECT count(*) FROM baseline_window) AS baseline_count
+        )
+        SELECT row_to_json(current_stats.*) AS current, row_to_json(baseline_stats.*) AS baseline, counts.*
+        FROM current_stats, baseline_stats, counts`
+      ),
+      query("SELECT * FROM data_quality_alerts WHERE status = 'open' ORDER BY last_seen_at DESC LIMIT 80"),
+      query("SELECT * FROM data_quality_runs ORDER BY created_at DESC LIMIT 12")
+    ]);
+    const row = counts.rows[0];
+    const fresh = freshness.rows[0];
+    const drift = buildDriftSummary(driftResult.rows[0]);
+    const avgScoreLagSeconds = Number(eventLag.rows[0]?.avg_score_lag_seconds ?? 0);
+    const staleMinutes = Number(fresh.latest_transaction_age_minutes ?? 999999);
+    const unscoredRate = Number(row.transactions_total) === 0 ? 0 : Number(row.unscored_transactions) / Number(row.transactions_total);
+    const checks: QualityCheck[] = [];
+    const addCheck = (
+      code: string,
+      label: string,
+      value: number,
+      warn: number,
+      fail: number,
+      description: string,
+      evidence: Record<string, unknown>,
+      critical = false
+    ) => {
+      const status = qualityStatus(value, warn, fail);
+      checks.push({
+        code,
+        label,
+        status,
+        severity: qualitySeverity(status, critical),
+        value,
+        threshold: status === "fail" ? fail : warn,
+        description,
+        evidence
+      });
+    };
+    addCheck("unscored_transactions", "Unscored transactions", Number(row.unscored_transactions), 5, 25, "Transactions older than 90 seconds have not received fraud scores.", { unscoredRate });
+    addCheck("invalid_transactions", "Invalid transaction values", Number(row.invalid_transactions), 1, 5, "Transactions contain invalid amount or currency values.", {});
+    addCheck("missing_entity_links", "Missing entity links", Number(row.missing_entity_links), 1, 3, "Transactions reference missing users, cards, or merchants.", {}, true);
+    addCheck("missing_feature_snapshots", "Missing feature snapshots", Number(row.missing_feature_snapshots), 5, 25, "Scored transactions are missing feature-store rows.", {});
+    addCheck("orphan_events", "Orphan event records", Number(row.orphan_events), 1, 5, "Event rows reference transactions that no longer exist.", {});
+    addCheck("dead_letter_events", "Dead-letter events", Number(row.dead_letter_events), 1, 5, "Scoring events reached the dead-letter path.", {});
+    addCheck("delayed_scoring_events", "Delayed scoring events", Number(row.delayed_scoring_events), 5, 20, "Created transaction events have not produced scoring events within five minutes.", {});
+    addCheck("ingestion_freshness", "Ingestion freshness", staleMinutes, 10, 30, "No recent transaction events have arrived.", { latestTransactionAgeMinutes: staleMinutes });
+    addCheck("score_lag", "Average scoring lag", avgScoreLagSeconds, 15, 45, "Average transaction_created to transaction_scored lag is elevated.", { avgScoreLagSeconds });
+    addCheck("feature_drift", "Feature drift index", drift.driftIndex, 0.2, 0.5, "Recent feature distribution has moved away from the previous baseline.", { drift });
+    const failing = checks.filter(check => check.status === "fail").length;
+    const warning = checks.filter(check => check.status === "warn").length;
+    const summary = {
+      status: failing ? "fail" : warning ? "warn" : "pass",
+      failing,
+      warning,
+      passing: checks.filter(check => check.status === "pass").length,
+      transactionCount: Number(row.transactions_total),
+      openAlertCount: activeAlerts.rowCount ?? 0,
+      driftStatus: drift.status,
+      driftIndex: drift.driftIndex
+    };
+    return { summary, checks, drift, alerts: activeAlerts.rows, recentRuns: recentRuns.rows };
+  };
+
+  const persistQualityRun = async (actor: string, overview: Awaited<ReturnType<typeof buildQualityOverview>>) => {
+    const run = await query(
+      "INSERT INTO data_quality_runs (summary, checks, created_by) VALUES ($1,$2,$3) RETURNING *",
+      [JSON.stringify(overview.summary), JSON.stringify(overview.checks), actor]
+    );
+    for (const check of overview.checks.filter(item => item.status !== "pass")) {
+      const existing = await query(
+        "SELECT id FROM data_quality_alerts WHERE status = 'open' AND alert_type = $1 AND title = $2 LIMIT 1",
+        [check.code, check.label]
+      );
+      const evidence = { value: check.value, threshold: check.threshold, ...check.evidence };
+      if (existing.rowCount) {
+        await query(
+          `UPDATE data_quality_alerts
+           SET severity = $1, description = $2, evidence = $3, last_seen_at = now()
+          WHERE id = $4`,
+          [check.severity, check.description, JSON.stringify(evidence), existing.rows[0].id]
+        );
+      } else {
+        await query(
+          `INSERT INTO data_quality_alerts (alert_type, severity, title, description, evidence)
+           VALUES ($1,$2,$3,$4,$5)`,
+          [check.code, check.severity, check.label, check.description, JSON.stringify(evidence)]
+        );
+      }
+    }
+    const passingCodes = overview.checks.filter(item => item.status === "pass").map(item => item.code);
+    if (passingCodes.length) {
+      await query(
+        "UPDATE data_quality_alerts SET status = 'resolved', resolved_at = now(), last_seen_at = now() WHERE status = 'open' AND alert_type = ANY($1::text[])",
+        [passingCodes]
+      );
+    }
+    return run.rows[0];
+  };
+
+  app.get("/quality/overview", async (_req, res, next) => {
+    try {
+      res.json(await buildQualityOverview());
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/quality/run", security.requireAuth("analyst"), async (req, res, next) => {
+    try {
+      const body = z.object({ actor: z.string().min(2).default("demo-quality") }).parse(req.body ?? {});
+      const overview = await buildQualityOverview();
+      const run = await persistQualityRun(body.actor, overview);
+      const updatedOverview = await buildQualityOverview();
+      await query(
+        "INSERT INTO audit_logs (actor, action, entity_type, entity_id, payload) VALUES ($1,'data_quality_run','data_quality_run',$2,$3)",
+        [body.actor, run.id, JSON.stringify({ summary: overview.summary })]
+      );
+      res.status(201).json({ run, ...updatedOverview });
+    } catch (error) {
+      next(error);
+    }
   });
 
   app.post("/models/recalibrate", security.requireAuth("admin"), async (req, res, next) => {

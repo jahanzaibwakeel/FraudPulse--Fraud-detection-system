@@ -148,6 +148,10 @@ Round 9 adds rolling risk memory for users, cards, merchants, devices, and IP ad
 
 Round 10 upgrades alert detail into a full case investigation workspace. The API builds a single evidence bundle containing the alert, transaction, feature snapshot, entity memory, related user/card/device/IP activity, merchant alert pattern, timeline, and recommended analyst actions. Analysts can save point-in-time evidence snapshots for auditability before final review.
 
+## Data Quality and Drift Alerts
+
+Round 11 adds data quality monitoring for the local event and feature pipeline. FraudPulse checks unscored transactions, invalid values, missing entity links, feature-store gaps, orphan events, dead-letter events, delayed scoring, ingestion freshness, scoring lag, and feature drift. Operators can run checks from the Data Quality page, persist quality runs, and track open drift/quality alerts.
+
 ## Round Roadmap
 
 Completed:
@@ -162,10 +166,10 @@ Completed:
 - Round 8: Model registry with champion/challenger promotion and rollback
 - Round 9: Entity risk memory for users, cards, devices, IPs, and merchants
 - Round 10: Case investigation workspace with evidence bundles
+- Round 11: Data quality checks and drift alerting
 
 Remaining:
 
-- Round 11: Data quality checks and drift alerting
 - Round 12: Advanced simulation lab for configurable fraud campaigns
 - Round 13: Real model benchmarking across multiple local algorithms
 - Round 14: Security hardening V2 with login, sessions, and key rotation
