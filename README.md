@@ -156,6 +156,10 @@ Round 11 adds data quality monitoring for the local event and feature pipeline. 
 
 Round 12 adds a configurable fraud campaign lab. Operators can choose a target demo account, select a campaign, tune transaction count, cadence, amount multiplier, fraud rate, device strategy, and IP strategy, then inject the generated transactions into the real API, queue, scoring worker, alert, and WebSocket path. Each run is persisted with parameters, expected signals, transaction IDs, and status.
 
+## Real Model Benchmarking
+
+Round 13 adds a local model benchmark suite. FraudPulse evaluates the same feature-store validation split across the rule baseline, trained logistic regression, Gaussian naive Bayes, and nearest-centroid classifiers. Benchmark runs are persisted with metrics, confusion matrices, algorithms tested, and the best algorithm by F1/recall.
+
 ## Round Roadmap
 
 Completed:
@@ -172,10 +176,10 @@ Completed:
 - Round 10: Case investigation workspace with evidence bundles
 - Round 11: Data quality checks and drift alerting
 - Round 12: Advanced simulation lab for configurable fraud campaigns
+- Round 13: Real model benchmarking across multiple local algorithms
 
 Remaining:
 
-- Round 13: Real model benchmarking across multiple local algorithms
 - Round 14: Security hardening V2 with login, sessions, and key rotation
 - Round 15: Deployment polish with CI, screenshots, and demo walkthrough
 

@@ -53,3 +53,10 @@ test("simulation lab renders configurable campaign controls", async ({ page }) =
   await expect(page.getByRole("button", { name: /Launch Campaign/i })).toBeVisible();
   await expect(page.getByText("Scenario Library")).toBeVisible();
 });
+
+test("model benchmarks page renders local algorithm suite", async ({ page }) => {
+  await page.goto("/benchmarks");
+  await expect(page.getByRole("heading", { name: "Model Benchmarks" })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Run Benchmark/i })).toBeVisible();
+  await expect(page.getByText("Algorithm Comparison")).toBeVisible();
+});

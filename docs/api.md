@@ -113,6 +113,8 @@ Case note:
 - `GET /models/registry` lists champion and challenger model versions.
 - `POST /models/:id/shadow-score` compares a model against the active champion on recent feature-store rows. Requires analyst.
 - `POST /models/:id/promote` promotes a model version to champion. Requires admin.
+- `GET /models/benchmarks` lists persisted local benchmark runs.
+- `POST /models/benchmarks/run` evaluates rule baseline, logistic regression, Gaussian naive Bayes, and nearest-centroid models on the same validation split. Requires admin.
 - `GET /models/drift` returns current-vs-baseline feature drift.
 - `POST /models/recalibrate` creates a new active local model version.
 - `POST /models/train` trains and activates a local logistic regression model from feature-store history. Requires admin.

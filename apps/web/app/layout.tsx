@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { Activity, Bell, BriefcaseBusiness, Database, FlaskConical, Gauge, LockKeyhole, Network, RadioTower, ShieldAlert, ShieldCheck, SlidersHorizontal, Target, Trophy } from "lucide-react";
+import { Activity, BarChart3, Bell, BriefcaseBusiness, Database, FlaskConical, Gauge, LockKeyhole, Network, RadioTower, ShieldAlert, ShieldCheck, SlidersHorizontal, Target, Trophy } from "lucide-react";
 import Link from "next/link";
 import "./styles.css";
 
@@ -19,6 +19,7 @@ const nav = [
   { href: "/quality", label: "Data Quality", icon: ShieldAlert },
   { href: "/performance", label: "Model Metrics", icon: Gauge },
   { href: "/models", label: "Model Registry", icon: Trophy },
+  { href: "/benchmarks", label: "Benchmarks", icon: BarChart3 },
   { href: "/metrics", label: "System Metrics", icon: Activity },
   { href: "/security", label: "Security", icon: LockKeyhole },
   { href: "/rules", label: "Rules", icon: SlidersHorizontal }

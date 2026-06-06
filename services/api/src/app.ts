@@ -136,6 +136,143 @@ const metricSummary = (predictions: Array<{ actual: boolean; predicted: boolean 
   };
 };
 
+type BenchmarkAlgorithm = "rule_baseline" | "logistic_regression" | "gaussian_naive_bayes" | "nearest_centroid";
+
+const benchmarkFeatureNames = ["velocity5m", "velocity1h", "amountZscore", "geoKmh", "merchantRisk", "newDevice", "userTx30d"] as const;
+
+type BenchmarkFeatureName = typeof benchmarkFeatureNames[number];
+
+const benchmarkFeatureValue = (sample: FraudTrainingSample, feature: BenchmarkFeatureName) => {
+  if (feature === "velocity5m") return Math.min(Math.max(sample.features.velocity5m, 0), 100);
+  if (feature === "velocity1h") return Math.min(Math.max(sample.features.velocity1h, 0), 400);
+  if (feature === "amountZscore") return clamp(sample.features.amountZscore, -5, 8);
+  if (feature === "geoKmh") return Math.min(Math.max(sample.features.geoKmh, 0), 2500);
+  if (feature === "merchantRisk") return clamp(sample.features.merchantRisk, 0, 100);
+  if (feature === "newDevice") return sample.features.deviceSeen ? 0 : 1;
+  return Math.min(Math.max(sample.features.userTx30d, 0), 150);
+};
+
+const benchmarkStats = (samples: FraudTrainingSample[]) => {
+  const normalization = benchmarkFeatureNames.reduce((acc, feature) => {
+    const values = samples.map(sample => benchmarkFeatureValue(sample, feature));
+    const mean = values.reduce((sum, value) => sum + value, 0) / Math.max(values.length, 1);
+    const variance = values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / Math.max(values.length, 1);
+    acc[feature] = { mean, scale: Math.max(Math.sqrt(variance), 0.0001) };
+    return acc;
+  }, {} as Record<BenchmarkFeatureName, { mean: number; scale: number }>);
+  return normalization;
+};
+
+const benchmarkVector = (
+  sample: FraudTrainingSample,
+  normalization: Record<BenchmarkFeatureName, { mean: number; scale: number }>
+) => benchmarkFeatureNames.map(feature => {
+  const stats = normalization[feature];
+  return (benchmarkFeatureValue(sample, feature) - stats.mean) / stats.scale;
+});
+
+const benchmarkConfusion = (
+  samples: FraudTrainingSample[],
+  predicted: (sample: FraudTrainingSample) => boolean
+) => metricSummary(samples.map(sample => ({ actual: sample.actual, predicted: predicted(sample) })));
+
+const evaluateGaussianNaiveBayes = (train: FraudTrainingSample[], validation: FraudTrainingSample[]) => {
+  const byClass = {
+    fraud: train.filter(sample => sample.actual),
+    legit: train.filter(sample => !sample.actual)
+  };
+  const classStats = (samples: FraudTrainingSample[]) => benchmarkFeatureNames.reduce((acc, feature) => {
+    const values = samples.map(sample => benchmarkFeatureValue(sample, feature));
+    const mean = values.reduce((sum, value) => sum + value, 0) / Math.max(values.length, 1);
+    const variance = values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / Math.max(values.length, 1);
+    acc[feature] = { mean, variance: Math.max(variance, 0.0001) };
+    return acc;
+  }, {} as Record<BenchmarkFeatureName, { mean: number; variance: number }>);
+  const stats = { fraud: classStats(byClass.fraud), legit: classStats(byClass.legit) };
+  const priorFraud = Math.max(byClass.fraud.length / Math.max(train.length, 1), 0.0001);
+  const priorLegit = Math.max(byClass.legit.length / Math.max(train.length, 1), 0.0001);
+  const logLikelihood = (sample: FraudTrainingSample, kind: "fraud" | "legit") => {
+    const prior = kind === "fraud" ? priorFraud : priorLegit;
+    return benchmarkFeatureNames.reduce((sum, feature) => {
+      const value = benchmarkFeatureValue(sample, feature);
+      const { mean, variance } = stats[kind][feature];
+      return sum - 0.5 * Math.log(2 * Math.PI * variance) - ((value - mean) ** 2) / (2 * variance);
+    }, Math.log(prior));
+  };
+  return benchmarkConfusion(validation, sample => logLikelihood(sample, "fraud") >= logLikelihood(sample, "legit"));
+};
+
+const evaluateNearestCentroid = (train: FraudTrainingSample[], validation: FraudTrainingSample[]) => {
+  const normalization = benchmarkStats(train);
+  const centroid = (samples: FraudTrainingSample[]) => {
+    const vectors = samples.map(sample => benchmarkVector(sample, normalization));
+    return benchmarkFeatureNames.map((_feature, index) =>
+      vectors.reduce((sum, vector) => sum + vector[index], 0) / Math.max(vectors.length, 1)
+    );
+  };
+  const fraudCentroid = centroid(train.filter(sample => sample.actual));
+  const legitCentroid = centroid(train.filter(sample => !sample.actual));
+  const distance = (vector: number[], target: number[]) =>
+    Math.sqrt(vector.reduce((sum, value, index) => sum + (value - target[index]) ** 2, 0));
+  return benchmarkConfusion(validation, sample => {
+    const vector = benchmarkVector(sample, normalization);
+    return distance(vector, fraudCentroid) <= distance(vector, legitCentroid);
+  });
+};
+
+const benchmarkModels = (
+  samples: FraudTrainingSample[],
+  algorithms: BenchmarkAlgorithm[],
+  alertThreshold: number
+) => {
+  if (samples.length < 50) throw new Error("benchmark_requires_at_least_50_samples");
+  if (!samples.some(sample => sample.actual) || !samples.some(sample => !sample.actual)) {
+    throw new Error("benchmark_requires_both_fraud_and_legitimate_samples");
+  }
+  const train = samples.filter((_sample, index) => index % 5 !== 0);
+  const validation = samples.filter((_sample, index) => index % 5 === 0);
+  const evalSet = validation.length ? validation : train;
+  const results = algorithms.map(algorithm => {
+    if (algorithm === "rule_baseline") {
+      return {
+        algorithm,
+        label: "Rule Baseline",
+        metrics: benchmarkConfusion(evalSet, sample => sample.ruleScore >= alertThreshold),
+        notes: "Current rules-only score at the production alert threshold."
+      };
+    }
+    if (algorithm === "logistic_regression") {
+      const trained = trainFraudLogisticModel(samples, { alertThreshold, blendRuleWeight: 0.48 });
+      return {
+        algorithm,
+        label: "Logistic Regression",
+        metrics: trained.metrics,
+        notes: "Local SGD logistic regression trained from feature-store labels."
+      };
+    }
+    if (algorithm === "gaussian_naive_bayes") {
+      return {
+        algorithm,
+        label: "Gaussian Naive Bayes",
+        metrics: evaluateGaussianNaiveBayes(train, evalSet),
+        notes: "Local probabilistic baseline assuming independent numeric features."
+      };
+    }
+    return {
+      algorithm,
+      label: "Nearest Centroid",
+      metrics: evaluateNearestCentroid(train, evalSet),
+      notes: "Local distance baseline comparing samples to fraud and legitimate centroids."
+    };
+  });
+  const best = [...results].sort((a, b) => {
+    const f1Delta = Number(b.metrics.f1Score) - Number(a.metrics.f1Score);
+    if (Math.abs(f1Delta) > 0.0001) return f1Delta;
+    return Number(b.metrics.recall) - Number(a.metrics.recall);
+  })[0];
+  return { trainSize: train.length, validationSize: evalSet.length, results, bestAlgorithm: best?.algorithm ?? null };
+};
+
 type DriftRow = {
   current: Record<string, unknown>;
   baseline: Record<string, unknown>;
@@ -1592,6 +1729,86 @@ export const createApp = () => {
       );
       res.status(201).json(inserted.rows[0]);
     } catch (error) {
+      next(error);
+    }
+  });
+
+  const loadBenchmarkSamples = async (maxSamples: number) => {
+    const rows = await query<TrainingRow>(
+      `WITH latest_decision AS (
+        SELECT DISTINCT ON (rd.alert_id) rd.alert_id, rd.decision
+        FROM review_decisions rd
+        ORDER BY rd.alert_id, rd.created_at DESC
+      )
+      SELECT
+        CASE
+          WHEN ld.decision = 'confirmed_fraud' THEN true
+          WHEN ld.decision = 'false_positive' THEN false
+          ELSE t.is_fraud_ground_truth
+        END AS actual,
+        COALESCE(fs.rule_score, fs.score, 0) AS rule_score,
+        tf.velocity_5m,
+        tf.velocity_1h,
+        tf.user_tx_30d,
+        tf.amount_zscore,
+        tf.geo_kmh,
+        tf.merchant_risk,
+        tf.device_seen
+      FROM transaction_features tf
+      JOIN transactions t ON t.id = tf.transaction_id
+      LEFT JOIN fraud_scores fs ON fs.transaction_id = tf.transaction_id
+      LEFT JOIN fraud_alerts fa ON fa.transaction_id = tf.transaction_id
+      LEFT JOIN latest_decision ld ON ld.alert_id = fa.id
+      ORDER BY tf.created_at DESC
+      LIMIT $1`,
+      [maxSamples]
+    );
+    return rows.rows.map(toTrainingSample);
+  };
+
+  app.get("/models/benchmarks", async (_req, res) => {
+    const result = await query("SELECT * FROM model_benchmark_runs ORDER BY created_at DESC LIMIT 20");
+    res.json({ runs: result.rows });
+  });
+
+  app.post("/models/benchmarks/run", security.requireAuth("admin"), async (req, res, next) => {
+    try {
+      const body = z.object({
+        actor: z.string().min(2).default("demo-mlops"),
+        maxSamples: z.number().int().min(50).max(50000).default(10000),
+        alertThreshold: z.number().min(1).max(99).default(55),
+        algorithms: z.array(z.enum(["rule_baseline", "logistic_regression", "gaussian_naive_bayes", "nearest_centroid"]))
+          .min(1)
+          .default(["rule_baseline", "logistic_regression", "gaussian_naive_bayes", "nearest_centroid"])
+      }).parse(req.body ?? {});
+      const samples = await loadBenchmarkSamples(body.maxSamples);
+      const benchmark = benchmarkModels(samples, body.algorithms, body.alertThreshold);
+      const inserted = await query(
+        `INSERT INTO model_benchmark_runs
+          (sample_size, validation_size, algorithms, results, best_algorithm, created_by)
+         VALUES ($1,$2,$3,$4,$5,$6)
+         RETURNING *`,
+        [
+          samples.length,
+          benchmark.validationSize,
+          JSON.stringify(body.algorithms),
+          JSON.stringify(benchmark.results),
+          benchmark.bestAlgorithm,
+          body.actor
+        ]
+      );
+      await query(
+        "INSERT INTO audit_logs (actor, action, entity_type, entity_id, payload) VALUES ($1,'model_benchmark_run','model_benchmark_run',$2,$3)",
+        [body.actor, inserted.rows[0].id, JSON.stringify({ sampleSize: samples.length, bestAlgorithm: benchmark.bestAlgorithm })]
+      );
+      res.status(201).json({ run: inserted.rows[0], ...benchmark, sampleSize: samples.length });
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith("benchmark_requires")) {
+        return res.status(409).json({ error: error.message });
+      }
+      if (error instanceof Error && error.message.startsWith("training_requires")) {
+        return res.status(409).json({ error: error.message });
+      }
       next(error);
     }
   });

@@ -73,6 +73,10 @@ The eleventh round adds operational trust checks around the fraud pipeline. Frau
 
 The twelfth round expands demo replay into a configurable campaign lab. Analysts can tune transaction volume, velocity, amount multiplier, fraud rate, device reuse, IP reuse, and target account before launching a campaign. Each run is stored with parameters, expected signals, generated transaction IDs, and completion state. Because campaign transactions still pass through API ingestion, BullMQ scoring, PostgreSQL events, and WebSocket updates, the lab is useful for stress-testing detection behavior rather than only showing static examples.
 
+## Real Model Benchmarking
+
+The thirteenth round adds a local benchmark harness for model selection. FraudPulse compares the rule baseline, trained logistic regression, Gaussian naive Bayes, and nearest-centroid classifiers against the same feature-store validation split. Each benchmark run stores algorithm names, sample counts, confusion matrices, precision, recall, F1, false positive rate, and the best algorithm. This makes model quality conversations evidence-based without requiring paid AutoML or cloud notebooks.
+
 ## Production Hardening
 
 The final round adds local role-based API tokens, protected Socket.IO connections, service tokens for simulator/worker traffic, per-token rate limiting, audit-log inspection, and downloadable analyst reports. These controls keep the demo runnable on one laptop while showing production instincts: least-privilege mutation routes, operational exports, observable access patterns, and tests for rejected unauthorized access.
