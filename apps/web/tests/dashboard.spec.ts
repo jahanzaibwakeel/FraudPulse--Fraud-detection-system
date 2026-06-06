@@ -25,3 +25,9 @@ test("model registry exposes champion challenger workflow", async ({ page }) => 
   await expect(page.getByText("Model Versions")).toBeVisible();
   await expect(page.getByRole("button", { name: /Shadow Score/i })).toBeVisible();
 });
+
+test("risk memory page renders entity risk surface", async ({ page }) => {
+  await page.goto("/risk");
+  await expect(page.getByRole("heading", { name: "Risk Memory" })).toBeVisible();
+  await expect(page.getByText("Highest Risk Entities")).toBeVisible();
+});

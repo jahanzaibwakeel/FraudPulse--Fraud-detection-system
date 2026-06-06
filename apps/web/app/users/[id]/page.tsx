@@ -12,6 +12,7 @@ type UserProfile = {
   std_amount: string;
   transaction_count: string;
   alert_count: string;
+  entity_risk?: { risk_score: string; velocity_score: string; anomaly_score: string; updated_at: string } | null;
 };
 
 export default function UserProfilePage({ params }: { params: { id: string } }) {
@@ -26,11 +27,11 @@ export default function UserProfilePage({ params }: { params: { id: string } }) 
         <MetricTile label="Transactions" value={profile.transaction_count} tone="cool" />
         <MetricTile label="Alerts" value={profile.alert_count} tone="hot" />
         <MetricTile label="Average amount" value={`$${Number(profile.avg_amount).toFixed(2)}`} />
-        <MetricTile label="Amount stddev" value={`$${Number(profile.std_amount).toFixed(2)}`} />
+        <MetricTile label="Memory risk" value={Number(profile.entity_risk?.risk_score ?? 0).toFixed(1)} tone="warn" />
       </section>
       <section className="panel formRow">
         <p>{profile.email}</p>
-        <p>FraudPulse compares this user’s current spend, device, and geo pattern against recent behavior before applying merchant and velocity risk.</p>
+        <p>FraudPulse compares this user's current spend, device, and geo pattern against recent behavior before applying merchant, velocity, and accumulated entity risk memory.</p>
       </section>
     </div>
   );

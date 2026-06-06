@@ -99,6 +99,8 @@ Case note:
 
 - `GET /profiles/users/:id` returns user risk history.
 - `GET /profiles/merchants/:id` returns merchant risk analysis.
+- `GET /risk/entities?type=user` returns rolling entity risk memory for users, cards, merchants, devices, or IPs.
+- `GET /risk/entities/:type/:id` returns one entity memory record and recent related transactions.
 - `GET /rules` returns active scoring rules.
 - `PATCH /rules/:code` updates rule status or weight.
 - `POST /rules/preview` estimates alert and metric changes for proposed rule weights.

@@ -582,12 +582,14 @@ export const createApp = () => {
         COALESCE(avg(t.amount), 0) AS avg_amount,
         COALESCE(stddev_pop(t.amount), 0) AS std_amount,
         count(t.id) AS transaction_count,
-        count(fa.id) AS alert_count
+        count(fa.id) AS alert_count,
+        row_to_json(erm.*) AS entity_risk
        FROM users u
        LEFT JOIN transactions t ON t.user_id = u.id
        LEFT JOIN fraud_alerts fa ON fa.user_id = u.id
+       LEFT JOIN entity_risk_memory erm ON erm.entity_type = 'user' AND erm.entity_id = u.id::text
        WHERE u.id = $1
-       GROUP BY u.id`,
+       GROUP BY u.id, erm.id`,
       [req.params.id]
     );
     if (!result.rowCount) return res.status(404).json({ error: "user_not_found" });
@@ -596,16 +598,80 @@ export const createApp = () => {
 
   app.get("/profiles/merchants/:id", async (req, res) => {
     const result = await query(
-      `SELECT m.*, count(t.id) AS transaction_count, count(fa.id) AS alert_count, COALESCE(avg(fs.score), 0) AS avg_score
+      `SELECT m.*, count(t.id) AS transaction_count, count(fa.id) AS alert_count, COALESCE(avg(fs.score), 0) AS avg_score,
+        row_to_json(erm.*) AS entity_risk
        FROM merchants m
        LEFT JOIN transactions t ON t.merchant_id = m.id
        LEFT JOIN fraud_scores fs ON fs.transaction_id = t.id
        LEFT JOIN fraud_alerts fa ON fa.merchant_id = m.id
+       LEFT JOIN entity_risk_memory erm ON erm.entity_type = 'merchant' AND erm.entity_id = m.id::text
        WHERE m.id = $1
-       GROUP BY m.id`,
+       GROUP BY m.id, erm.id`,
       [req.params.id]
     );
     if (!result.rowCount) return res.status(404).json({ error: "merchant_not_found" });
+    res.json(result.rows[0]);
+  });
+
+  app.get("/risk/entities", async (req, res) => {
+    const entityType = req.query.type ? String(req.query.type) : null;
+    const limit = Math.min(Number(req.query.limit ?? 100), 250);
+    const result = await query(
+      `SELECT erm.*,
+        CASE
+          WHEN erm.entity_type = 'user' THEN u.full_name
+          WHEN erm.entity_type = 'merchant' THEN m.name
+          WHEN erm.entity_type = 'card' THEN 'Card ' || c.last4
+          ELSE erm.entity_id
+        END AS label,
+        CASE
+          WHEN erm.entity_type = 'merchant' THEN m.category
+          WHEN erm.entity_type = 'card' THEN c.network
+          ELSE erm.entity_type
+        END AS category
+       FROM entity_risk_memory erm
+       LEFT JOIN users u ON erm.entity_type = 'user' AND erm.entity_id = u.id::text
+       LEFT JOIN merchants m ON erm.entity_type = 'merchant' AND erm.entity_id = m.id::text
+       LEFT JOIN cards c ON erm.entity_type = 'card' AND erm.entity_id = c.id::text
+       WHERE ($1::text IS NULL OR erm.entity_type = $1)
+       ORDER BY erm.risk_score DESC, erm.updated_at DESC
+       LIMIT $2`,
+      [entityType, limit]
+    );
+    const summary = await query(
+      `SELECT entity_type, count(*) AS entity_count, COALESCE(avg(risk_score), 0) AS avg_risk, COALESCE(max(risk_score), 0) AS max_risk
+       FROM entity_risk_memory
+       GROUP BY entity_type
+       ORDER BY max_risk DESC`
+    );
+    res.json({ entities: result.rows, summary: summary.rows });
+  });
+
+  app.get("/risk/entities/:type/:id", async (req, res) => {
+    const result = await query(
+      `SELECT erm.*,
+        COALESCE((
+          SELECT json_agg(row_to_json(x))
+          FROM (
+            SELECT t.id, t.amount, t.currency, t.channel, t.occurred_at, fs.score, fs.severity, m.name AS merchant_name
+            FROM transactions t
+            LEFT JOIN fraud_scores fs ON fs.transaction_id = t.id
+            LEFT JOIN merchants m ON m.id = t.merchant_id
+            WHERE
+              ($1 = 'user' AND t.user_id::text = $2) OR
+              ($1 = 'card' AND t.card_id::text = $2) OR
+              ($1 = 'merchant' AND t.merchant_id::text = $2) OR
+              ($1 = 'device' AND t.device_fingerprint = $2) OR
+              ($1 = 'ip' AND t.ip_address::text = $2)
+            ORDER BY t.occurred_at DESC
+            LIMIT 25
+          ) x
+        ), '[]'::json) AS recent_transactions
+       FROM entity_risk_memory erm
+       WHERE erm.entity_type = $1 AND erm.entity_id = $2`,
+      [req.params.type, req.params.id]
+    );
+    if (!result.rowCount) return res.status(404).json({ error: "entity_risk_not_found" });
     res.json(result.rows[0]);
   });
 

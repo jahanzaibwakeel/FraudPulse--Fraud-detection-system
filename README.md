@@ -140,6 +140,10 @@ Round 7 adds trained-model feature contribution explanations. Each ML-driven ale
 
 Round 8 adds champion/challenger model governance. The Model Registry page lists all local model versions, identifies the active champion, recommends an inactive challenger, runs shadow scoring against recent feature-store rows, and allows admin promotion or rollback without deleting model history.
 
+## Entity Risk Memory
+
+Round 9 adds rolling risk memory for users, cards, merchants, devices, and IP addresses. The scoring worker updates `entity_risk_memory` after each scored transaction, blending alert score, velocity, anomaly strength, merchant risk, and recent evidence. The Risk Memory page surfaces the highest-risk entities and user/merchant profiles include persisted memory risk.
+
 ## Round Roadmap
 
 Completed:
@@ -152,10 +156,10 @@ Completed:
 - Round 6: Real trained local fraud model
 - Round 7: Model explainability with per-feature trained-model contributions
 - Round 8: Model registry with champion/challenger promotion and rollback
+- Round 9: Entity risk memory for users, cards, devices, IPs, and merchants
 
 Remaining:
 
-- Round 9: Entity risk memory for users, cards, devices, IPs, and merchants
 - Round 10: Case investigation workspace with evidence bundles
 - Round 11: Data quality checks and drift alerting
 - Round 12: Advanced simulation lab for configurable fraud campaigns

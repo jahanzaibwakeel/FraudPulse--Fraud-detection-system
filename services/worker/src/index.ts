@@ -19,12 +19,14 @@ const scoringQueue = new Queue("score-transactions", { connection });
 type TransactionRow = {
   id: string;
   user_id: string;
+  card_id: string;
   merchant_id: string;
   amount: string | number;
   occurred_at: string;
   latitude: string | number;
   longitude: string | number;
   device_fingerprint: string;
+  ip_address: string;
   merchant_name: string;
   merchant_category: string;
   risk_score: string | number;
@@ -61,6 +63,71 @@ const broadcast = async (event: string, payload: unknown) => {
     });
   } catch (err) {
     logger.warn({ err, event }, "broadcast_failed");
+  }
+};
+
+const clampRisk = (value: number) => Math.max(0, Math.min(99, Number(value.toFixed(2))));
+
+const updateEntityRiskMemory = async (
+  tx: TransactionRow,
+  result: { score: number; severity: string; reasons: unknown[] },
+  featureVector: { velocity5m: number; velocity1h: number; amountZscore: number; geoKmh: number; merchantRisk: number; deviceSeen: boolean }
+) => {
+  const alertCount = result.score >= 55 ? 1 : 0;
+  const velocityScore = clampRisk(featureVector.velocity5m * 7 + featureVector.velocity1h * 1.2);
+  const anomalyScore = clampRisk(Math.max(featureVector.amountZscore, 0) * 16 + Math.min(featureVector.geoKmh / 35, 35));
+  const alertScore = clampRisk(result.score >= 55 ? result.score : result.score * 0.35);
+  const reviewScore = 0;
+  const riskScore = clampRisk(alertScore * 0.58 + velocityScore * 0.14 + anomalyScore * 0.18 + featureVector.merchantRisk * 0.1);
+  const evidence = {
+    transactionId: tx.id,
+    score: result.score,
+    severity: result.severity,
+    velocity5m: featureVector.velocity5m,
+    velocity1h: featureVector.velocity1h,
+    amountZscore: featureVector.amountZscore,
+    geoKmh: featureVector.geoKmh,
+    merchantRisk: featureVector.merchantRisk,
+    deviceSeen: featureVector.deviceSeen,
+    reasonCount: result.reasons.length
+  };
+  const entities = [
+    { type: "user", id: tx.user_id },
+    { type: "card", id: tx.card_id },
+    { type: "merchant", id: tx.merchant_id },
+    { type: "device", id: tx.device_fingerprint },
+    { type: "ip", id: tx.ip_address }
+  ];
+  for (const entity of entities) {
+    await query(
+      `INSERT INTO entity_risk_memory
+        (entity_type, entity_id, risk_score, velocity_score, anomaly_score, alert_score, review_score,
+         transaction_count, alert_count, last_seen_at, evidence)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,1,$8,$9,$10)
+       ON CONFLICT (entity_type, entity_id) DO UPDATE SET
+         risk_score = LEAST(99, entity_risk_memory.risk_score * 0.82 + EXCLUDED.risk_score * 0.18 + CASE WHEN EXCLUDED.alert_count > 0 THEN 2 ELSE 0 END),
+         velocity_score = LEAST(99, entity_risk_memory.velocity_score * 0.78 + EXCLUDED.velocity_score * 0.22),
+         anomaly_score = LEAST(99, entity_risk_memory.anomaly_score * 0.78 + EXCLUDED.anomaly_score * 0.22),
+         alert_score = LEAST(99, entity_risk_memory.alert_score * 0.82 + EXCLUDED.alert_score * 0.18),
+         review_score = LEAST(99, entity_risk_memory.review_score * 0.95 + EXCLUDED.review_score * 0.05),
+         transaction_count = entity_risk_memory.transaction_count + 1,
+         alert_count = entity_risk_memory.alert_count + EXCLUDED.alert_count,
+         last_seen_at = EXCLUDED.last_seen_at,
+         evidence = EXCLUDED.evidence,
+         updated_at = now()`,
+      [
+        entity.type,
+        entity.id,
+        riskScore,
+        velocityScore,
+        anomalyScore,
+        alertScore,
+        reviewScore,
+        alertCount,
+        tx.occurred_at,
+        evidence
+      ]
+    );
   }
 };
 
@@ -194,6 +261,7 @@ const worker = new Worker(
         featureVector.deviceSeen
       ]
     );
+    await updateEntityRiskMemory(tx, result, featureVector);
     await query(
       "INSERT INTO transaction_events (transaction_id, event_type, payload) VALUES ($1,'transaction_scored',$2)",
       [transactionId, result]

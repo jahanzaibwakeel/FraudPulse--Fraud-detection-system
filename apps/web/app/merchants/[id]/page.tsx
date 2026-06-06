@@ -12,6 +12,7 @@ type MerchantProfile = {
   transaction_count: string;
   alert_count: string;
   avg_score: string;
+  entity_risk?: { risk_score: string; velocity_score: string; anomaly_score: string; updated_at: string } | null;
 };
 
 export default function MerchantProfilePage({ params }: { params: { id: string } }) {
@@ -26,10 +27,10 @@ export default function MerchantProfilePage({ params }: { params: { id: string }
         <MetricTile label="Country" value={profile.country} />
         <MetricTile label="Merchant risk" value={profile.risk_score} tone="warn" />
         <MetricTile label="Alerts" value={profile.alert_count} tone="hot" />
-        <MetricTile label="Avg fraud score" value={Number(profile.avg_score).toFixed(1)} />
+        <MetricTile label="Memory risk" value={Number(profile.entity_risk?.risk_score ?? 0).toFixed(1)} />
       </section>
       <section className="panel formRow">
-        <p>Merchant profile risk is blended with transaction-level behavior to avoid treating merchant category alone as proof of fraud.</p>
+        <p>Merchant profile risk is blended with transaction-level behavior and accumulated entity memory to avoid treating merchant category alone as proof of fraud.</p>
       </section>
     </div>
   );
