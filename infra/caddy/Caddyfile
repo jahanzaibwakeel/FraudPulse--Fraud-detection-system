@@ -1,5 +1,14 @@
 {$WEB_DOMAIN} {
   encode gzip
+
+  handle /socket.io/* {
+    reverse_proxy api:4000
+  }
+
+  handle_path /api/* {
+    reverse_proxy api:4000
+  }
+
   reverse_proxy web:3000
 }
 

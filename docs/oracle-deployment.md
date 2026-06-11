@@ -45,13 +45,13 @@ cp .env.oracle.example .env
 nano .env
 ```
 
-Change at least these values:
+Change at least these values for a normal domain deployment:
 
 ```env
 WEB_DOMAIN=your-web-domain.example.com
 API_DOMAIN=your-api-domain.example.com
-NEXT_PUBLIC_API_URL=https://your-api-domain.example.com
-NEXT_PUBLIC_WS_URL=https://your-api-domain.example.com
+NEXT_PUBLIC_API_URL=https://your-web-domain.example.com/api
+NEXT_PUBLIC_WS_URL=https://your-web-domain.example.com
 ALLOWED_ORIGINS=https://your-web-domain.example.com
 
 POSTGRES_PASSWORD=long-random-password
@@ -65,6 +65,18 @@ GF_SECURITY_ADMIN_PASSWORD=long-random-grafana-password
 ```
 
 Do not commit `.env`.
+
+For a quick IP-only Oracle demo before you have a domain, use the same public IP for the frontend and same-origin API route:
+
+```env
+WEB_DOMAIN=:80
+API_DOMAIN=:8080
+NEXT_PUBLIC_API_URL=http://80.225.243.147/api
+NEXT_PUBLIC_WS_URL=http://80.225.243.147
+ALLOWED_ORIGINS=http://80.225.243.147
+```
+
+The Caddy config routes `/api/*` and `/socket.io/*` to the backend, so the browser does not need a public `8080` port.
 
 ## DNS
 
@@ -110,14 +122,15 @@ docker compose -f docker-compose.oracle.yml ps
 Check:
 
 ```bash
-curl http://localhost:4000/health
+TOKEN=$(grep '^NEXT_PUBLIC_API_TOKEN=' .env | cut -d= -f2-)
+curl -i -H "Authorization: Bearer $TOKEN" http://localhost/api/admin/overview
 ```
 
 Open:
 
 ```txt
 https://your-web-domain.example.com
-https://your-api-domain.example.com/health
+https://your-web-domain.example.com/api/health
 ```
 
 ## GitHub Secrets For Auto Deploy
