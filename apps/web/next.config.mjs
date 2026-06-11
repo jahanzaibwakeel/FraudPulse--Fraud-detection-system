@@ -7,6 +7,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const nextConfig = {
   transpilePackages: ["@fraudpulse/shared"],
   output: "standalone",
+  allowedDevOrigins: ["127.0.0.1"],
   turbopack: {
     root: path.resolve(__dirname, "../..")
   }

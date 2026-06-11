@@ -13,9 +13,9 @@ export default defineConfig({
     { name: "chromium", use: { ...devices["Desktop Chrome"] } }
   ],
   webServer: useExternalServer ? undefined : {
-    command: "npm run dev",
+    command: "npm run dev -- --hostname 127.0.0.1",
     url: "http://127.0.0.1:3000",
-    reuseExistingServer: true,
+    reuseExistingServer: !process.env.CI,
     timeout: 120000
   }
 });
