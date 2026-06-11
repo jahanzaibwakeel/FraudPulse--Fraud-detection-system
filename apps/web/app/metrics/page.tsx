@@ -30,7 +30,7 @@ export default function MetricsPage() {
         <MetricTile label="Avg latency" value={`${Math.round(Number(overview?.avg_latency_ms ?? 0))} ms`} />
       </section>
       <section className="panel formRow">
-        <p>Prometheus scrapes `/metrics` from the API and worker. Grafana is provisioned at port 3001 with the FraudPulse dashboard.</p>
+        <p>Prometheus scrapes `/metrics` from the API and worker. Grafana dashboards run in local/private monitoring mode and should stay behind authentication, a VPN, or an SSH tunnel rather than being exposed publicly.</p>
       </section>
     </div>
   );
