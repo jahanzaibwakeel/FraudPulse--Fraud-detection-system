@@ -123,7 +123,7 @@ export default function OperationsPage() {
         <div className="panel">
           <div className="panelHeader">
             <h2>SLA Breaches</h2>
-            <button className="primary" onClick={bulkAssignBreached} disabled={assigning || !sla?.breachedAlerts.length}>
+            <button className="primary" onClick={bulkAssignBreached} disabled={assigning || !sla}>
               {assigning ? "Assigning..." : "Assign Top 50"}
             </button>
           </div>

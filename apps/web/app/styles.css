@@ -101,7 +101,7 @@ td { color: #d6e6ea; overflow: hidden; text-overflow: ellipsis; }
 textarea, input, select { width: 100%; background: #091316; border: 1px solid var(--line); color: var(--text); padding: 10px; }
 .primary { border: 1px solid #2f5965; background: #12333a; color: var(--text); padding: 10px 12px; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 7px; }
 .primary:hover { border-color: var(--cyan); }
-.primary:disabled { opacity: 0.55; cursor: wait; }
+.primary:disabled { opacity: 0.55; cursor: not-allowed; }
 .split { display: flex; gap: 8px; }
 .timeline { display: grid; gap: 0; }
 .timelineItem { padding: 12px 14px; border-top: 1px solid var(--line); display: grid; gap: 5px; }
