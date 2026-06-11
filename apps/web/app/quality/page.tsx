@@ -65,8 +65,16 @@ const formatValue = (value: number) => Math.abs(value) >= 100 ? value.toFixed(0)
 export default function QualityPage() {
   const [overview, setOverview] = useState<QualityOverview | null>(null);
   const [running, setRunning] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  const refresh = async () => setOverview(await apiGet<QualityOverview>("/quality/overview"));
+  const refresh = async () => {
+    try {
+      setError(null);
+      setOverview(await apiGet<QualityOverview>("/quality/overview"));
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : "Failed to load data quality overview.");
+    }
+  };
 
   useEffect(() => {
     refresh();
@@ -76,9 +84,15 @@ export default function QualityPage() {
 
   const runChecks = async () => {
     setRunning(true);
-    const next = await apiPost<QualityOverview>("/quality/run", { actor: "demo-quality" });
-    setOverview(next);
-    setRunning(false);
+    setError(null);
+    try {
+      const next = await apiPost<QualityOverview>("/quality/run", { actor: "demo-quality" });
+      setOverview(next);
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : "Failed to run data quality checks.");
+    } finally {
+      setRunning(false);
+    }
   };
 
   return (
@@ -101,6 +115,8 @@ export default function QualityPage() {
         <MetricTile label="Open alerts" value={overview?.summary.openAlertCount ?? 0} />
         <MetricTile label="Drift index" value={(overview?.summary.driftIndex ?? 0).toFixed(3)} tone={overview?.summary.driftStatus === "high" ? "hot" : overview?.summary.driftStatus === "medium" ? "warn" : "cool"} />
       </section>
+
+      {error && <div className="notice">Data Quality could not load: {error}</div>}
 
       <section className="opsGrid lower">
         <div className="panel">
