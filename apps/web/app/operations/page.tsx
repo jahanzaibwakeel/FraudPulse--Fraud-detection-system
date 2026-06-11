@@ -43,6 +43,8 @@ export default function OperationsPage() {
   const [views, setViews] = useState<SavedView[]>([]);
   const [dlq, setDlq] = useState<DlqEvent[]>([]);
   const [viewName, setViewName] = useState("My pending critical queue");
+  const [assigning, setAssigning] = useState(false);
+  const [operationMessage, setOperationMessage] = useState<string | null>(null);
 
   const refresh = async () => {
     const [slaData, savedViews, dlqEvents] = await Promise.all([
@@ -63,9 +65,21 @@ export default function OperationsPage() {
 
   const bulkAssignBreached = async () => {
     const alertIds = sla?.breachedAlerts.slice(0, 50).map(alert => alert.id) ?? [];
-    if (!alertIds.length) return;
-    await apiPost("/alerts/bulk/assign", { alertIds, assignedTo: "casey.ops", priority: 1, slaHours: 4, actor: "demo-lead" });
-    await refresh();
+    if (!alertIds.length) {
+      setOperationMessage("No breached pending alerts are available for bulk assignment.");
+      return;
+    }
+    setAssigning(true);
+    setOperationMessage(null);
+    try {
+      const result = await apiPost<{ updatedCount: number }>("/alerts/bulk/assign", { alertIds, assignedTo: "casey.ops", priority: 1, slaHours: 4, actor: "demo-lead" });
+      await refresh();
+      setOperationMessage(`Assigned ${result.updatedCount} breached alerts to casey.ops.`);
+    } catch (error) {
+      setOperationMessage(error instanceof Error ? error.message : "Bulk assignment failed.");
+    } finally {
+      setAssigning(false);
+    }
   };
 
   const saveCriticalView = async () => {
@@ -107,7 +121,13 @@ export default function OperationsPage() {
 
       <section className="opsGrid lower">
         <div className="panel">
-          <div className="panelHeader"><h2>SLA Breaches</h2><button className="primary" onClick={bulkAssignBreached}>Assign Top 50</button></div>
+          <div className="panelHeader">
+            <h2>SLA Breaches</h2>
+            <button className="primary" onClick={bulkAssignBreached} disabled={assigning || !sla?.breachedAlerts.length}>
+              {assigning ? "Assigning..." : "Assign Top 50"}
+            </button>
+          </div>
+          {operationMessage && <div className="notice">{operationMessage}</div>}
           <table>
             <thead><tr><th>Case</th><th>Customer</th><th>Merchant</th><th>Due</th><th>Owner</th></tr></thead>
             <tbody>
@@ -120,6 +140,9 @@ export default function OperationsPage() {
                   <td>{alert.assigned_to ?? "Unassigned"}</td>
                 </tr>
               ))}
+              {sla && !sla.breachedAlerts.length && (
+                <tr><td colSpan={5}>No breached pending alerts. New SLA breaches will appear here when pending cases pass their due time.</td></tr>
+              )}
             </tbody>
           </table>
         </div>

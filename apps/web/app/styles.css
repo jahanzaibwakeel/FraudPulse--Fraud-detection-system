@@ -50,6 +50,7 @@ h2 { margin: 0; font-size: 15px; }
 .opsGrid { display: grid; grid-template-columns: 1.6fr 0.9fr; gap: 12px; align-items: start; }
 .opsGrid.lower { margin-top: 12px; grid-template-columns: 1fr 1fr; }
 .panel { background: var(--panel); border: 1px solid var(--line); min-width: 0; }
+.notice { margin: 12px; padding: 10px 12px; border: 1px solid #31515b; background: #0b171b; color: #c2d4da; font-size: 13px; line-height: 1.4; }
 .span2 { min-height: 620px; }
 .panelHeader { height: 48px; border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; padding: 0 14px; color: #dcecee; }
 .chartBox { height: 260px; padding: 14px; background: #091316; }
