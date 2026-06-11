@@ -29,6 +29,7 @@ jobs:
         run: |
           cp .env.oracle.example .env
           docker compose -f docker-compose.oracle.yml config --quiet
+          docker compose -f docker-compose.oracle.images.yml config --quiet
           rm .env
 
       - name: Run tests
