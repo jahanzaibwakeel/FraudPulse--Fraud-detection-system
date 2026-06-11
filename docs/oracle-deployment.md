@@ -7,9 +7,12 @@ This guide deploys FraudPulse like a Vercel-style Git deploy, but on an Oracle A
 ```txt
 GitHub push to main
   -> GitHub Actions
+  -> Build Docker images on GitHub runners
+  -> Push images to GitHub Container Registry
   -> SSH into Oracle Ubuntu VM
-  -> git pull
-  -> docker compose -f docker-compose.oracle.yml up -d --build
+  -> git pull deployment files
+  -> docker compose -f docker-compose.oracle.images.yml pull
+  -> docker compose -f docker-compose.oracle.images.yml up -d
   -> Caddy serves HTTPS traffic
 ```
 
@@ -50,6 +53,8 @@ Change at least these values for a normal domain deployment:
 ```env
 WEB_DOMAIN=your-web-domain.example.com
 API_DOMAIN=your-api-domain.example.com
+FRAUDPULSE_IMAGE_OWNER=jahanzaibwakeel
+FRAUDPULSE_IMAGE_TAG=latest
 NEXT_PUBLIC_API_URL=https://your-web-domain.example.com/api
 NEXT_PUBLIC_WS_URL=https://your-web-domain.example.com
 ALLOWED_ORIGINS=https://your-web-domain.example.com
@@ -149,12 +154,36 @@ ORACLE_USER=ubuntu
 ORACLE_SSH_KEY=<contents of your private .key file>
 ```
 
+If your GitHub Container Registry packages are private, also create:
+
+```txt
+GHCR_TOKEN=<GitHub personal access token with read:packages>
+```
+
+For a public GitHub repository/package, this token may not be needed. Keeping it as a secret is the safer default.
+
 Then create this repository variable:
 
 ```txt
 Repository -> Settings -> Secrets and variables -> Actions -> Variables -> New repository variable
 
 ORACLE_AUTO_DEPLOY=true
+```
+
+Also create these repository variables. They are baked into the frontend image, so they must match your live Oracle `.env`:
+
+```txt
+NEXT_PUBLIC_API_URL=http://80.225.243.147/api
+NEXT_PUBLIC_WS_URL=http://80.225.243.147
+NEXT_PUBLIC_API_TOKEN=admin-token
+GHCR_USERNAME=your-github-username
+```
+
+For a domain deployment, use:
+
+```txt
+NEXT_PUBLIC_API_URL=https://your-web-domain.example.com/api
+NEXT_PUBLIC_WS_URL=https://your-web-domain.example.com
 ```
 
 Without `ORACLE_AUTO_DEPLOY=true`, pushes to `main` will skip deployment. You can still deploy manually from the Actions tab.
@@ -178,11 +207,29 @@ After secrets and `ORACLE_AUTO_DEPLOY=true` are configured, every push to `main`
 ```
 
 The workflow connects to Oracle, pulls the latest repo, rebuilds Docker images, restarts containers, and prints service status.
+With the image-based workflow, GitHub does the heavy Docker builds and Oracle only pulls the finished images. This avoids slow Next.js builds on the small Always Free VM.
 
 You can also deploy manually from GitHub:
 
 ```txt
 Actions -> Deploy to Oracle VM -> Run workflow
+```
+
+## Manual Image-Based Deploy
+
+If you want to deploy from the Oracle VM without rebuilding locally:
+
+```bash
+cd ~/FraudPulse--Fraud-detection-system
+git pull
+docker compose -f docker-compose.oracle.images.yml pull
+docker compose -f docker-compose.oracle.images.yml up -d
+```
+
+Use the old build-based compose only when you intentionally want to compile on the VM:
+
+```bash
+docker compose -f docker-compose.oracle.yml up -d --build
 ```
 
 ## Monitoring

@@ -31,6 +31,15 @@ docker compose -f docker-compose.oracle.yml up -d --build
 
 That stack runs Caddy on ports `80` and `443`, keeps PostgreSQL and Valkey private on the Docker network, and builds the Next.js frontend with the production API/WebSocket URLs.
 
+For CI/CD, prefer the image-based Oracle stack:
+
+```bash
+docker compose -f docker-compose.oracle.images.yml pull
+docker compose -f docker-compose.oracle.images.yml up -d
+```
+
+GitHub Actions builds and pushes the API, worker, simulator, and web images to GitHub Container Registry, then the Oracle VM pulls those images instead of compiling on the small VM.
+
 Full guide: [oracle-deployment.md](oracle-deployment.md)
 
 ## Required Configuration
@@ -81,4 +90,4 @@ The GitHub Actions workflow runs:
 - Docker Compose smoke checks
 - Playwright E2E against the Docker web app
 - Dashboard screenshot capture as a CI artifact
-- Oracle deployment workflow deploys `main` to the Oracle VM through SSH when repository secrets are configured.
+- Oracle deployment workflow builds GHCR images, deploys `main` to the Oracle VM through SSH, pulls the images, and restarts the image-based Compose stack when repository secrets and variables are configured.

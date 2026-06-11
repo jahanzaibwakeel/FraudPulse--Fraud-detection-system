@@ -5,14 +5,104 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: read
+  packages: write
+
 concurrency:
   group: oracle-production
   cancel-in-progress: false
 
 jobs:
+  build-images:
+    name: Build and push Docker images
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' || vars.ORACLE_AUTO_DEPLOY == 'true' }}
+    outputs:
+      image_owner: ${{ steps.image-meta.outputs.image_owner }}
+      image_tag: ${{ steps.image-meta.outputs.image_tag }}
+    steps:
+      - name: Check required frontend build variables
+        run: |
+          test -n "${{ vars.NEXT_PUBLIC_API_URL }}"
+          test -n "${{ vars.NEXT_PUBLIC_WS_URL }}"
+          test -n "${{ vars.NEXT_PUBLIC_API_TOKEN }}"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve image metadata
+        id: image-meta
+        run: |
+          echo "image_owner=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push API image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: services/api/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ steps.image-meta.outputs.image_owner }}/fraudpulse-api:${{ steps.image-meta.outputs.image_tag }}
+            ghcr.io/${{ steps.image-meta.outputs.image_owner }}/fraudpulse-api:latest
+          cache-from: type=gha,scope=api
+          cache-to: type=gha,mode=max,scope=api
+
+      - name: Build and push worker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: services/worker/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ steps.image-meta.outputs.image_owner }}/fraudpulse-worker:${{ steps.image-meta.outputs.image_tag }}
+            ghcr.io/${{ steps.image-meta.outputs.image_owner }}/fraudpulse-worker:latest
+          cache-from: type=gha,scope=worker
+          cache-to: type=gha,mode=max,scope=worker
+
+      - name: Build and push simulator image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: services/simulator/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ steps.image-meta.outputs.image_owner }}/fraudpulse-simulator:${{ steps.image-meta.outputs.image_tag }}
+            ghcr.io/${{ steps.image-meta.outputs.image_owner }}/fraudpulse-simulator:latest
+          cache-from: type=gha,scope=simulator
+          cache-to: type=gha,mode=max,scope=simulator
+
+      - name: Build and push web image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/web/Dockerfile
+          push: true
+          build-args: |
+            NEXT_PUBLIC_API_URL=${{ vars.NEXT_PUBLIC_API_URL }}
+            NEXT_PUBLIC_WS_URL=${{ vars.NEXT_PUBLIC_WS_URL }}
+            NEXT_PUBLIC_API_TOKEN=${{ vars.NEXT_PUBLIC_API_TOKEN }}
+          tags: |
+            ghcr.io/${{ steps.image-meta.outputs.image_owner }}/fraudpulse-web:${{ steps.image-meta.outputs.image_tag }}
+            ghcr.io/${{ steps.image-meta.outputs.image_owner }}/fraudpulse-web:latest
+          cache-from: type=gha,scope=web
+          cache-to: type=gha,mode=max,scope=web
+
   deploy:
     name: Deploy FraudPulse
     runs-on: ubuntu-latest
+    needs: build-images
     if: ${{ github.event_name == 'workflow_dispatch' || vars.ORACLE_AUTO_DEPLOY == 'true' }}
     steps:
       - name: Configure SSH
@@ -33,8 +123,13 @@ jobs:
         env:
           ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
           ORACLE_USER: ${{ secrets.ORACLE_USER }}
+          GHCR_USER: ${{ vars.GHCR_USERNAME || github.actor }}
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+          FRAUDPULSE_IMAGE_OWNER: ${{ needs.build-images.outputs.image_owner }}
+          FRAUDPULSE_IMAGE_TAG: ${{ needs.build-images.outputs.image_tag }}
         run: |
-          ssh -i ~/.ssh/oracle_vm_key "$ORACLE_USER@$ORACLE_HOST" 'bash -s' <<'REMOTE'
+          ssh -i ~/.ssh/oracle_vm_key "$ORACLE_USER@$ORACLE_HOST" \
+            "GHCR_USER=$(printf '%q' "$GHCR_USER") GHCR_TOKEN=$(printf '%q' "$GHCR_TOKEN") FRAUDPULSE_IMAGE_OWNER=$(printf '%q' "$FRAUDPULSE_IMAGE_OWNER") FRAUDPULSE_IMAGE_TAG=$(printf '%q' "$FRAUDPULSE_IMAGE_TAG") bash -s" <<'REMOTE'
           set -euo pipefail
           APP_DIR="$HOME/FraudPulse--Fraud-detection-system"
           REPO_URL="https://github.com/jahanzaibwakeel/FraudPulse--Fraud-detection-system.git"
@@ -53,8 +148,17 @@ jobs:
             exit 1
           fi
 
-          docker compose -f docker-compose.oracle.yml config --quiet
-          docker compose -f docker-compose.oracle.yml up -d --build
-          docker compose -f docker-compose.oracle.yml ps
+          if [ -n "${GHCR_TOKEN:-}" ]; then
+            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+          fi
+
+          export FRAUDPULSE_IMAGE_REGISTRY=ghcr.io
+          export FRAUDPULSE_IMAGE_OWNER="$FRAUDPULSE_IMAGE_OWNER"
+          export FRAUDPULSE_IMAGE_TAG="$FRAUDPULSE_IMAGE_TAG"
+
+          docker compose -f docker-compose.oracle.images.yml config --quiet
+          docker compose -f docker-compose.oracle.images.yml pull
+          docker compose -f docker-compose.oracle.images.yml up -d --remove-orphans
+          docker compose -f docker-compose.oracle.images.yml ps
           docker image prune -f
           REMOTE
