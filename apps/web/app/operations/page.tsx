@@ -28,6 +28,7 @@ type Sla = {
   high_risk_pending: string;
   workload: Workload[];
   breachedAlerts: AlertRow[];
+  assignmentQueue: AlertRow[];
 };
 type SavedView = { id: string; name: string; owner: string; filters: Record<string, string | boolean>; updated_at: string };
 type DlqEvent = { id: string; transaction_id?: string | null; payload: Record<string, unknown>; error?: string; created_at: string };
@@ -63,10 +64,10 @@ export default function OperationsPage() {
     return () => clearInterval(timer);
   }, []);
 
-  const bulkAssignBreached = async () => {
-    const alertIds = sla?.breachedAlerts.slice(0, 50).map(alert => alert.id) ?? [];
+  const bulkAssignPending = async () => {
+    const alertIds = sla?.assignmentQueue.slice(0, 50).map(alert => alert.id) ?? [];
     if (!alertIds.length) {
-      setOperationMessage("No breached pending alerts are available for bulk assignment.");
+      setOperationMessage("No unassigned pending alerts are available for bulk assignment.");
       return;
     }
     setAssigning(true);
@@ -74,7 +75,7 @@ export default function OperationsPage() {
     try {
       const result = await apiPost<{ updatedCount: number }>("/alerts/bulk/assign", { alertIds, assignedTo: "casey.ops", priority: 1, slaHours: 4, actor: "demo-lead" });
       await refresh();
-      setOperationMessage(`Assigned ${result.updatedCount} breached alerts to casey.ops.`);
+      setOperationMessage(`Assigned ${result.updatedCount} pending alerts to casey.ops.`);
     } catch (error) {
       setOperationMessage(error instanceof Error ? error.message : "Bulk assignment failed.");
     } finally {
@@ -123,8 +124,8 @@ export default function OperationsPage() {
         <div className="panel">
           <div className="panelHeader">
             <h2>SLA Breaches</h2>
-            <button className="primary" onClick={bulkAssignBreached} disabled={assigning || !sla}>
-              {assigning ? "Assigning..." : "Assign Top 50"}
+            <button className="primary" onClick={bulkAssignPending} disabled={assigning || !sla}>
+              {assigning ? "Assigning..." : "Assign Top 50 Pending"}
             </button>
           </div>
           {operationMessage && <div className="notice">{operationMessage}</div>}

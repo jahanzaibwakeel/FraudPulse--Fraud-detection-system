@@ -979,7 +979,25 @@ export const createApp = () => {
        ORDER BY fa.due_at ASC
        LIMIT 50`
     );
-    res.json({ ...summary.rows[0], workload: workload.rows, breachedAlerts: breached.rows });
+    const assignmentQueue = await query(
+      `SELECT fa.*, u.full_name, m.name AS merchant_name, t.amount, t.currency, t.occurred_at
+       FROM fraud_alerts fa
+       JOIN users u ON u.id = fa.user_id
+       JOIN merchants m ON m.id = fa.merchant_id
+       JOIN transactions t ON t.id = fa.transaction_id
+       WHERE fa.status = 'pending' AND fa.assigned_to IS NULL
+       ORDER BY
+        CASE fa.severity
+          WHEN 'critical' THEN 1
+          WHEN 'high' THEN 2
+          WHEN 'medium' THEN 3
+          ELSE 4
+        END,
+        fa.score DESC,
+        fa.created_at ASC
+       LIMIT 50`
+    );
+    res.json({ ...summary.rows[0], workload: workload.rows, breachedAlerts: breached.rows, assignmentQueue: assignmentQueue.rows });
   });
 
   app.get("/dlq/events", async (req, res) => {
