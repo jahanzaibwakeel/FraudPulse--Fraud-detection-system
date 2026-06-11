@@ -17,6 +17,7 @@ type ModelMetrics = {
 
 type HybridSummary = {
   activeModel: {
+    id?: string;
     version: string;
     parameters: {
       modelKind?: string;
@@ -27,6 +28,19 @@ type HybridSummary = {
     metrics?: { validationSize?: number; f1Score?: number; precision?: number; recall?: number };
     created_at: string;
   } | null;
+  recentModels: Array<{
+    id: string;
+    version: string;
+    parameters: {
+      modelKind?: string;
+      trainingAlgorithm?: string;
+      blendRuleWeight?: number;
+      trainingWindow?: { sampleSize: number; fraudSamples: number; legitimateSamples: number };
+    };
+    metrics?: { validationSize?: number; f1Score?: number; precision?: number; recall?: number };
+    active: boolean;
+    created_at: string;
+  }>;
   scored_count: string;
   avg_rule_score: string;
   avg_ml_score: string;
@@ -131,6 +145,31 @@ export default function PerformancePage() {
         <MetricTile label="Train samples" value={hybrid?.activeModel?.parameters?.trainingWindow?.sampleSize ?? 0} />
         <MetricTile label="Validation F1" value={hybrid?.activeModel?.metrics?.f1Score?.toFixed(3) ?? "n/a"} tone="cool" />
         <MetricTile label="Disagreements" value={hybrid?.disagreement_count ?? 0} tone="warn" />
+      </section>
+
+      <section className="panel">
+        <div className="panelHeader"><h2>Recent Train and Recalibration Runs</h2><strong>{hybrid?.recentModels?.length ?? 0}</strong></div>
+        <table>
+          <thead><tr><th>Version</th><th>Status</th><th>Kind</th><th>Algorithm</th><th>Samples</th><th>F1</th><th>Precision</th><th>Recall</th><th>Created</th></tr></thead>
+          <tbody>
+            {hybrid?.recentModels?.map(model => (
+              <tr key={model.id}>
+                <td>{model.version}</td>
+                <td>{model.active ? "active" : "candidate"}</td>
+                <td>{model.parameters?.modelKind ?? "hand_tuned"}</td>
+                <td>{model.parameters?.trainingAlgorithm ?? "rules_blend"}</td>
+                <td>{Number(model.parameters?.trainingWindow?.sampleSize ?? 0).toLocaleString()}</td>
+                <td>{model.metrics?.f1Score?.toFixed(3) ?? "n/a"}</td>
+                <td>{model.metrics?.precision ? `${(model.metrics.precision * 100).toFixed(1)}%` : "n/a"}</td>
+                <td>{model.metrics?.recall ? `${(model.metrics.recall * 100).toFixed(1)}%` : "n/a"}</td>
+                <td>{new Date(model.created_at).toLocaleString()}</td>
+              </tr>
+            ))}
+            {!hybrid?.recentModels?.length && (
+              <tr><td colSpan={9}>No model training or recalibration runs have been saved yet.</td></tr>
+            )}
+          </tbody>
+        </table>
       </section>
 
       <section className="opsGrid lower">

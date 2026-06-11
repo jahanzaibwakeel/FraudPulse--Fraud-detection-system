@@ -46,6 +46,23 @@ type RegistryModelRow = {
   created_at: string;
 };
 
+type ShadowRunRow = {
+  id: string;
+  candidate_model_id: string;
+  champion_model_id: string;
+  candidate_version: string;
+  champion_version: string;
+  sample_size: number;
+  alert_threshold: string | number;
+  candidate: Record<string, unknown>;
+  champion: Record<string, unknown>;
+  alert_delta: number;
+  disagreement_count: number;
+  disagreement_rate: string | number;
+  created_by: string;
+  created_at: string;
+};
+
 type ShadowFeatureRow = {
   actual: boolean;
   rule_score: string | number | null;
@@ -1287,9 +1304,54 @@ export const createApp = () => {
     });
   });
 
+  const ensureModelRunTables = async () => {
+    await query(`
+      CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+      CREATE TABLE IF NOT EXISTS model_benchmark_runs (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        status TEXT NOT NULL DEFAULT 'completed' CHECK (status IN ('completed', 'failed')),
+        sample_size INTEGER NOT NULL,
+        validation_size INTEGER NOT NULL,
+        algorithms JSONB NOT NULL DEFAULT '[]',
+        results JSONB NOT NULL DEFAULT '[]',
+        best_algorithm TEXT,
+        created_by TEXT NOT NULL DEFAULT 'system',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
+      CREATE TABLE IF NOT EXISTS model_shadow_runs (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        candidate_model_id UUID REFERENCES model_versions(id),
+        champion_model_id UUID REFERENCES model_versions(id),
+        candidate_version TEXT NOT NULL,
+        champion_version TEXT NOT NULL,
+        sample_size INTEGER NOT NULL,
+        alert_threshold NUMERIC NOT NULL,
+        candidate JSONB NOT NULL,
+        champion JSONB NOT NULL,
+        alert_delta INTEGER NOT NULL,
+        disagreement_count INTEGER NOT NULL,
+        disagreement_rate NUMERIC NOT NULL,
+        created_by TEXT NOT NULL DEFAULT 'system',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_model_benchmark_runs_created ON model_benchmark_runs(created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_model_shadow_runs_created ON model_shadow_runs(created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_model_shadow_runs_candidate ON model_shadow_runs(candidate_model_id, created_at DESC);
+    `);
+  };
+
   app.get("/models/hybrid", async (_req, res) => {
     const model = await query(
       "SELECT id, version, parameters, metrics, active, created_at FROM model_versions WHERE active = true ORDER BY created_at DESC LIMIT 1"
+    );
+    const recentModels = await query<RegistryModelRow>(
+      `SELECT id, version, parameters, metrics, active, created_at
+       FROM model_versions
+       ORDER BY created_at DESC
+       LIMIT 8`
     );
     const summary = await query(
       `SELECT
@@ -1331,6 +1393,7 @@ export const createApp = () => {
     );
     res.json({
       activeModel: model.rows[0] ?? null,
+      recentModels: recentModels.rows,
       ...summary.rows[0],
       topDisagreements: recent.rows,
       topModelContributions: contributions.rows
@@ -1338,11 +1401,15 @@ export const createApp = () => {
   });
 
   app.get("/models/registry", async (_req, res) => {
+    await ensureModelRunTables();
     const models = await query<RegistryModelRow>(
       `SELECT id, version, parameters, metrics, active, created_at
        FROM model_versions
        ORDER BY active DESC, created_at DESC
        LIMIT 60`
+    );
+    const shadowRuns = await query<ShadowRunRow>(
+      "SELECT * FROM model_shadow_runs ORDER BY created_at DESC LIMIT 20"
     );
     const champion = models.rows.find(model => model.active) ?? null;
     const challengers = models.rows.filter(model => !model.active);
@@ -1353,6 +1420,7 @@ export const createApp = () => {
       champion,
       recommendedChallenger,
       models: models.rows,
+      shadowRuns: shadowRuns.rows,
       counts: {
         total: models.rowCount,
         trained: models.rows.filter(model => model.version.startsWith("trained-logit")).length,
@@ -1389,7 +1457,9 @@ export const createApp = () => {
 
   app.post("/models/:id/shadow-score", security.requireAuth("analyst"), async (req, res, next) => {
     try {
+      await ensureModelRunTables();
       const body = z.object({
+        actor: z.string().min(2).default("demo-mlops"),
         sampleSize: z.number().int().min(50).max(10000).default(2000),
         alertThreshold: z.number().min(1).max(99).default(55)
       }).parse(req.body ?? {});
@@ -1439,7 +1509,7 @@ export const createApp = () => {
       const disagreementCount = pairs.filter(pair => pair.candidatePredicted !== pair.championPredicted).length;
       const candidateAlerts = pairs.filter(pair => pair.candidatePredicted).length;
       const championAlerts = pairs.filter(pair => pair.championPredicted).length;
-      res.json({
+      const result = {
         sampleSize: sampleResult.rowCount,
         alertThreshold: body.alertThreshold,
         champion: { id: champion.id, version: champion.version, metrics: championMetrics, alerts: championAlerts },
@@ -1447,7 +1517,50 @@ export const createApp = () => {
         alertDelta: candidateAlerts - championAlerts,
         disagreementCount,
         disagreementRate: sampleResult.rowCount ? disagreementCount / sampleResult.rowCount : 0
+      };
+      const inserted = await query<ShadowRunRow>(
+        `INSERT INTO model_shadow_runs
+          (candidate_model_id, champion_model_id, candidate_version, champion_version, sample_size, alert_threshold,
+           candidate, champion, alert_delta, disagreement_count, disagreement_rate, created_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+         RETURNING *`,
+        [
+          candidate.id,
+          champion.id,
+          candidate.version,
+          champion.version,
+          result.sampleSize,
+          body.alertThreshold,
+          JSON.stringify(result.candidate),
+          JSON.stringify(result.champion),
+          result.alertDelta,
+          result.disagreementCount,
+          result.disagreementRate,
+          body.actor
+        ]
+      );
+      await query(
+        "INSERT INTO audit_logs (actor, action, entity_type, entity_id, payload) VALUES ($1,'model_shadow_run','model_shadow_run',$2,$3)",
+        [body.actor, inserted.rows[0].id, JSON.stringify({ candidate: candidate.version, champion: champion.version, sampleSize: result.sampleSize })]
+      );
+      res.status(201).json({
+        run: inserted.rows[0],
+        ...result
       });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get("/models/shadow-runs", async (req, res, next) => {
+    try {
+      await ensureModelRunTables();
+      const limit = Math.min(Number(req.query.limit ?? 20), 100);
+      const result = await query<ShadowRunRow>(
+        "SELECT * FROM model_shadow_runs ORDER BY created_at DESC LIMIT $1",
+        [limit]
+      );
+      res.json({ runs: result.rows });
     } catch (error) {
       next(error);
     }
@@ -1842,12 +1955,14 @@ export const createApp = () => {
   };
 
   app.get("/models/benchmarks", async (_req, res) => {
+    await ensureModelRunTables();
     const result = await query("SELECT * FROM model_benchmark_runs ORDER BY created_at DESC LIMIT 20");
     res.json({ runs: result.rows });
   });
 
   app.post("/models/benchmarks/run", security.requireAuth("admin"), async (req, res, next) => {
     try {
+      await ensureModelRunTables();
       const body = z.object({
         actor: z.string().min(2).default("demo-mlops"),
         maxSamples: z.number().int().min(50).max(50000).default(10000),

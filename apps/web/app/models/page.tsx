@@ -23,7 +23,23 @@ type Registry = {
   champion: ModelVersion | null;
   recommendedChallenger: ModelVersion | null;
   models: ModelVersion[];
+  shadowRuns: ShadowRun[];
   counts: { total: number; trained: number; challengers: number };
+};
+
+type ShadowRun = {
+  id: string;
+  candidate_version: string;
+  champion_version: string;
+  sample_size: number;
+  alert_threshold: string | number;
+  candidate: { alerts: number; metrics: { precision: number; recall: number; f1Score: number; falsePositiveRate: number } };
+  champion: { alerts: number; metrics: { precision: number; recall: number; f1Score: number; falsePositiveRate: number } };
+  alert_delta: number;
+  disagreement_count: number;
+  disagreement_rate: string | number;
+  created_by: string;
+  created_at: string;
 };
 
 type ShadowResult = {
@@ -36,6 +52,24 @@ type ShadowResult = {
   disagreementRate: number;
 };
 
+const shadowFromRun = (run: ShadowRun): ShadowResult => ({
+  sampleSize: Number(run.sample_size),
+  alertThreshold: Number(run.alert_threshold),
+  champion: {
+    version: run.champion_version,
+    alerts: Number(run.champion?.alerts ?? 0),
+    metrics: run.champion.metrics
+  },
+  candidate: {
+    version: run.candidate_version,
+    alerts: Number(run.candidate?.alerts ?? 0),
+    metrics: run.candidate.metrics
+  },
+  alertDelta: Number(run.alert_delta),
+  disagreementCount: Number(run.disagreement_count),
+  disagreementRate: Number(run.disagreement_rate)
+});
+
 export default function ModelsPage() {
   const [registry, setRegistry] = useState<Registry | null>(null);
   const [selectedModelId, setSelectedModelId] = useState<string>("");
@@ -46,6 +80,7 @@ export default function ModelsPage() {
     const next = await apiGet<Registry>("/models/registry");
     setRegistry(next);
     setSelectedModelId(current => current || next.recommendedChallenger?.id || next.models.find(model => !model.active)?.id || "");
+    setShadow(current => current ?? (next.shadowRuns?.[0] ? shadowFromRun(next.shadowRuns[0]) : null));
   };
 
   useEffect(() => {
@@ -55,18 +90,25 @@ export default function ModelsPage() {
   const runShadow = async (modelId = selectedModelId) => {
     if (!modelId) return;
     setBusy(true);
-    const result = await apiPost<ShadowResult>(`/models/${modelId}/shadow-score`, { sampleSize: 2000, alertThreshold: 55 });
-    setShadow(result);
-    setBusy(false);
+    try {
+      const result = await apiPost<ShadowResult>(`/models/${modelId}/shadow-score`, { actor: "demo-mlops", sampleSize: 2000, alertThreshold: 55 });
+      setShadow(result);
+      await refresh();
+    } finally {
+      setBusy(false);
+    }
   };
 
   const promote = async (modelId: string) => {
     setBusy(true);
-    await apiPost(`/models/${modelId}/promote`, { actor: "demo-mlops" });
-    setShadow(null);
-    setSelectedModelId("");
-    await refresh();
-    setBusy(false);
+    try {
+      await apiPost(`/models/${modelId}/promote`, { actor: "demo-mlops" });
+      setShadow(null);
+      setSelectedModelId("");
+      await refresh();
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -123,6 +165,30 @@ export default function ModelsPage() {
             <div className="modelHero"><p>Select a challenger and run a shadow score to compare it against the champion without changing production scoring.</p></div>
           )}
         </div>
+      </section>
+
+      <section className="panel">
+        <div className="panelHeader"><h2>Recent Shadow Runs</h2><strong>{registry?.shadowRuns?.length ?? 0}</strong></div>
+        <table>
+          <thead><tr><th>Candidate</th><th>Champion</th><th>Sample</th><th>Candidate F1</th><th>Champion F1</th><th>Alert Delta</th><th>Disagree</th><th>Run At</th></tr></thead>
+          <tbody>
+            {registry?.shadowRuns?.map(run => (
+              <tr key={run.id}>
+                <td>{run.candidate_version}</td>
+                <td>{run.champion_version}</td>
+                <td>{Number(run.sample_size).toLocaleString()}</td>
+                <td>{Number(run.candidate?.metrics?.f1Score ?? 0).toFixed(3)}</td>
+                <td>{Number(run.champion?.metrics?.f1Score ?? 0).toFixed(3)}</td>
+                <td>{Number(run.alert_delta) > 0 ? "+" : ""}{Number(run.alert_delta)}</td>
+                <td>{(Number(run.disagreement_rate) * 100).toFixed(1)}%</td>
+                <td>{new Date(run.created_at).toLocaleString()}</td>
+              </tr>
+            ))}
+            {!registry?.shadowRuns?.length && (
+              <tr><td colSpan={8}>No shadow runs yet. Run a challenger comparison and it will be saved here.</td></tr>
+            )}
+          </tbody>
+        </table>
       </section>
 
       <section className="panel">
