@@ -18,12 +18,16 @@ a { color: inherit; text-decoration: none; }
 button { font: inherit; }
 
 .shell { display: grid; grid-template-columns: 248px 1fr; min-height: 100vh; }
-.rail { border-right: 1px solid var(--line); background: #081216; padding: 18px 14px; position: sticky; top: 0; height: 100vh; }
-.brand { display: flex; align-items: center; gap: 12px; padding: 8px 8px 22px; }
+.rail { border-right: 1px solid var(--line); background: #081216; padding: 18px 14px; position: sticky; top: 0; height: 100vh; display: grid; grid-template-rows: auto minmax(0, 1fr); overflow: hidden; }
+.brand { display: flex; align-items: center; gap: 12px; padding: 8px 8px 18px; }
 .brandMark { width: 38px; height: 38px; display: grid; place-items: center; border: 1px solid #2f5965; background: #0d2228; color: var(--cyan); }
 .brand strong { display: block; font-size: 18px; }
 .brand small, td small { display: block; color: var(--muted); margin-top: 2px; }
-.navItem { display: flex; align-items: center; gap: 10px; padding: 11px 10px; color: #c2d4da; border-left: 2px solid transparent; }
+.rail nav { min-height: 0; overflow-y: auto; overflow-x: hidden; padding: 4px 2px 14px 0; scrollbar-width: thin; scrollbar-color: #31515b transparent; }
+.rail nav::-webkit-scrollbar { width: 8px; }
+.rail nav::-webkit-scrollbar-thumb { background: #31515b; border-radius: 999px; }
+.rail nav::-webkit-scrollbar-track { background: transparent; }
+.navItem { display: flex; align-items: center; gap: 10px; min-height: 42px; padding: 9px 10px; color: #c2d4da; border-left: 2px solid transparent; }
 .navItem:hover { background: #102026; border-left-color: var(--cyan); }
 .workspace { min-width: 0; }
 .screen { padding: 24px; }
@@ -137,8 +141,9 @@ textarea, input, select { width: 100%; background: #091316; border: 1px solid va
 
 @media (max-width: 1000px) {
   .shell { grid-template-columns: 1fr; }
-  .rail { position: relative; height: auto; display: block; }
-  .rail nav { display: flex; overflow-x: auto; }
+  .rail { position: relative; height: auto; display: block; overflow: visible; }
+  .rail nav { display: flex; overflow-x: auto; overflow-y: hidden; padding-bottom: 4px; }
+  .navItem { flex: 0 0 auto; white-space: nowrap; }
   .brand small { display: none; }
   .metricGrid, .opsGrid, .opsGrid.lower, .detailGrid, .caseLayout, .ringLayout, .filterBar, .reportSummary, .evidenceGrid { grid-template-columns: 1fr; }
   .screen { padding: 16px; }
