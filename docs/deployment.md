@@ -19,6 +19,20 @@ Open:
 
 Grafana login defaults to `admin` / `fraudpulse`.
 
+## Oracle Free VM Production Run
+
+Use the Oracle-specific Compose stack for a public deployment:
+
+```bash
+cp .env.oracle.example .env
+nano .env
+docker compose -f docker-compose.oracle.yml up -d --build
+```
+
+That stack runs Caddy on ports `80` and `443`, keeps PostgreSQL and Valkey private on the Docker network, and builds the Next.js frontend with the production API/WebSocket URLs.
+
+Full guide: [oracle-deployment.md](oracle-deployment.md)
+
 ## Required Configuration
 
 Before presenting or sharing a long-running local deployment, rotate the demo values in `.env`:
@@ -67,3 +81,4 @@ The GitHub Actions workflow runs:
 - Docker Compose smoke checks
 - Playwright E2E against the Docker web app
 - Dashboard screenshot capture as a CI artifact
+- Oracle deployment workflow deploys `main` to the Oracle VM through SSH when repository secrets are configured.

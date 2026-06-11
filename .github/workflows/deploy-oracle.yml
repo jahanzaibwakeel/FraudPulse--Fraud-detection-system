@@ -1,0 +1,60 @@
+name: Deploy to Oracle VM
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+concurrency:
+  group: oracle-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy FraudPulse
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' || vars.ORACLE_AUTO_DEPLOY == 'true' }}
+    steps:
+      - name: Configure SSH
+        env:
+          ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
+          ORACLE_USER: ${{ secrets.ORACLE_USER }}
+          ORACLE_SSH_KEY: ${{ secrets.ORACLE_SSH_KEY }}
+        run: |
+          test -n "$ORACLE_HOST"
+          test -n "$ORACLE_USER"
+          test -n "$ORACLE_SSH_KEY"
+          mkdir -p ~/.ssh
+          printf '%s\n' "$ORACLE_SSH_KEY" > ~/.ssh/oracle_vm_key
+          chmod 600 ~/.ssh/oracle_vm_key
+          ssh-keyscan -H "$ORACLE_HOST" >> ~/.ssh/known_hosts
+
+      - name: Deploy on Oracle VM
+        env:
+          ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
+          ORACLE_USER: ${{ secrets.ORACLE_USER }}
+        run: |
+          ssh -i ~/.ssh/oracle_vm_key "$ORACLE_USER@$ORACLE_HOST" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          APP_DIR="$HOME/FraudPulse--Fraud-detection-system"
+          REPO_URL="https://github.com/jahanzaibwakeel/FraudPulse--Fraud-detection-system.git"
+
+          if [ ! -d "$APP_DIR/.git" ]; then
+            git clone "$REPO_URL" "$APP_DIR"
+          fi
+
+          cd "$APP_DIR"
+          git fetch origin main
+          git checkout main
+          git pull --ff-only origin main
+
+          if [ ! -f .env ]; then
+            echo "Missing $APP_DIR/.env. Copy .env.oracle.example to .env and fill production values on the server."
+            exit 1
+          fi
+
+          docker compose -f docker-compose.oracle.yml config --quiet
+          docker compose -f docker-compose.oracle.yml up -d --build
+          docker compose -f docker-compose.oracle.yml ps
+          docker image prune -f
+          REMOTE

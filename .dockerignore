@@ -6,6 +6,13 @@ dist
 **/dist
 coverage
 .git
+.env
+.env.*
+!.env.example
+!.env.oracle.example
+*.pem
+*.key
+*.pub
 postgres-data
 grafana-data
 valkey-data

@@ -209,6 +209,7 @@ Remaining:
 - API documentation: [docs/api.md](docs/api.md)
 - Case study: [docs/case-study.md](docs/case-study.md)
 - Deployment guide: [docs/deployment.md](docs/deployment.md)
+- Oracle free VM deployment: [docs/oracle-deployment.md](docs/oracle-deployment.md)
 - Demo walkthrough: [docs/demo-walkthrough.md](docs/demo-walkthrough.md)
 - Screenshots: [docs/screenshots](docs/screenshots)
 - SQL schema: [infra/db/migrations/001_init.sql](infra/db/migrations/001_init.sql)

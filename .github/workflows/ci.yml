@@ -25,6 +25,12 @@ jobs:
       - name: Validate Compose file
         run: docker compose config --quiet
 
+      - name: Validate Oracle Compose file
+        run: |
+          cp .env.oracle.example .env
+          docker compose -f docker-compose.oracle.yml config --quiet
+          rm .env
+
       - name: Run tests
         run: npm test
 

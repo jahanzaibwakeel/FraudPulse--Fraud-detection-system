@@ -7,6 +7,12 @@ RUN npm install
 
 FROM deps AS build
 WORKDIR /app
+ARG NEXT_PUBLIC_API_URL=http://localhost:14000
+ARG NEXT_PUBLIC_WS_URL=http://localhost:14000
+ARG NEXT_PUBLIC_API_TOKEN=local-admin-token
+ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+ENV NEXT_PUBLIC_WS_URL=$NEXT_PUBLIC_WS_URL
+ENV NEXT_PUBLIC_API_TOKEN=$NEXT_PUBLIC_API_TOKEN
 COPY tsconfig.base.json ./
 COPY packages/shared packages/shared
 COPY apps/web apps/web
