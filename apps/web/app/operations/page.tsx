@@ -168,6 +168,50 @@ export default function OperationsPage() {
 
       <section className="opsGrid lower">
         <div className="panel">
+          <div className="panelHeader">
+            <h2>Top Pending Assignment Queue</h2>
+            <Link className="primary" href="/alerts?status=pending&assignedTo=unassigned">View Unassigned</Link>
+          </div>
+          <table>
+            <thead><tr><th>Case</th><th>Customer</th><th>Merchant</th><th>Amount</th><th>Owner</th></tr></thead>
+            <tbody>
+              {sla?.assignmentQueue.slice(0, 12).map(alert => (
+                <tr key={alert.id}>
+                  <td><Link href={`/alerts/${alert.id}`}><StatusPill value={alert.severity} /></Link><small>{Number(alert.score).toFixed(0)}</small></td>
+                  <td>{alert.full_name}</td>
+                  <td>{alert.merchant_name}</td>
+                  <td>{alert.currency} {Number(alert.amount).toFixed(2)}</td>
+                  <td>{alert.assigned_to ?? "Unassigned"}</td>
+                </tr>
+              ))}
+              {sla && !sla.assignmentQueue.length && (
+                <tr><td colSpan={5}>No unassigned pending alerts are available. Assigned cases can be viewed in the Alert Center.</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+
+        <div className="panel">
+          <div className="panelHeader"><h2>Assigned Case Views</h2></div>
+          <div className="timeline">
+            <div className="timelineItem">
+              <strong><Link href="/alerts?status=pending&assignedTo=casey.ops">Pending cases assigned to casey.ops</Link></strong>
+              <span>Use this after bulk assignment to see the cases moved from Unassigned into the analyst queue.</span>
+            </div>
+            <div className="timelineItem">
+              <strong><Link href="/alerts?status=confirmed_fraud&assignedTo=casey.ops">Confirmed fraud assigned to casey.ops</Link></strong>
+              <span>Resolved fraud decisions remain in Alert Center with status confirmed fraud.</span>
+            </div>
+            <div className="timelineItem">
+              <strong><Link href="/alerts?status=false_positive&assignedTo=casey.ops">False positives assigned to casey.ops</Link></strong>
+              <span>Resolved false-positive decisions remain available for audit and performance metrics.</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section className="opsGrid lower">
+        <div className="panel">
           <div className="panelHeader"><h2>Saved Queues</h2></div>
           <div className="formRow">
             <div className="split">
