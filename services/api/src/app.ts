@@ -1089,7 +1089,51 @@ export const createApp = () => {
     res.json(result.rows[0]);
   });
 
+  const ensureRiskOpsTables = async () => {
+    await query(`
+      CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+      CREATE TABLE IF NOT EXISTS entity_watchlist (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        entity_type TEXT NOT NULL CHECK (entity_type IN ('user', 'card', 'merchant', 'device', 'ip')),
+        entity_id TEXT NOT NULL,
+        action TEXT NOT NULL CHECK (action IN ('monitor', 'block', 'allow')),
+        reason TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'resolved')),
+        created_by TEXT NOT NULL DEFAULT 'system',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        resolved_at TIMESTAMPTZ,
+        UNIQUE (entity_type, entity_id, action, status)
+      );
+
+      CREATE TABLE IF NOT EXISTS entity_risk_overrides (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        entity_type TEXT NOT NULL CHECK (entity_type IN ('user', 'card', 'merchant', 'device', 'ip')),
+        entity_id TEXT NOT NULL,
+        risk_delta NUMERIC(6, 2) NOT NULL,
+        reason TEXT NOT NULL,
+        expires_at TIMESTAMPTZ,
+        created_by TEXT NOT NULL DEFAULT 'system',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
+      CREATE TABLE IF NOT EXISTS entity_notes (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        entity_type TEXT NOT NULL CHECK (entity_type IN ('user', 'card', 'merchant', 'device', 'ip')),
+        entity_id TEXT NOT NULL,
+        note TEXT NOT NULL,
+        created_by TEXT NOT NULL DEFAULT 'system',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_entity_watchlist_lookup ON entity_watchlist(entity_type, entity_id, status, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_entity_overrides_lookup ON entity_risk_overrides(entity_type, entity_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_entity_notes_lookup ON entity_notes(entity_type, entity_id, created_at DESC);
+    `);
+  };
+
   app.get("/risk/entities", async (req, res) => {
+    await ensureRiskOpsTables();
     const entityType = req.query.type ? String(req.query.type) : null;
     const limit = Math.min(Number(req.query.limit ?? 100), 250);
     const result = await query(
@@ -1104,11 +1148,30 @@ export const createApp = () => {
           WHEN erm.entity_type = 'merchant' THEN m.category
           WHEN erm.entity_type = 'card' THEN c.network
           ELSE erm.entity_type
-        END AS category
+        END AS category,
+        COALESCE(w.watchlist_actions, '[]'::json) AS watchlist_actions,
+        COALESCE(o.override_count, 0) AS override_count,
+        COALESCE(o.active_delta, 0) AS active_override_delta,
+        COALESCE(n.note_count, 0) AS note_count
        FROM entity_risk_memory erm
        LEFT JOIN users u ON erm.entity_type = 'user' AND erm.entity_id = u.id::text
        LEFT JOIN merchants m ON erm.entity_type = 'merchant' AND erm.entity_id = m.id::text
        LEFT JOIN cards c ON erm.entity_type = 'card' AND erm.entity_id = c.id::text
+       LEFT JOIN LATERAL (
+         SELECT json_agg(json_build_object('action', action, 'reason', reason, 'createdBy', created_by, 'createdAt', created_at) ORDER BY created_at DESC) AS watchlist_actions
+         FROM entity_watchlist ew
+         WHERE ew.entity_type = erm.entity_type AND ew.entity_id = erm.entity_id AND ew.status = 'active'
+       ) w ON true
+       LEFT JOIN LATERAL (
+         SELECT count(*) AS override_count, COALESCE(sum(risk_delta) FILTER (WHERE expires_at IS NULL OR expires_at > now()), 0) AS active_delta
+         FROM entity_risk_overrides eo
+         WHERE eo.entity_type = erm.entity_type AND eo.entity_id = erm.entity_id
+       ) o ON true
+       LEFT JOIN LATERAL (
+         SELECT count(*) AS note_count
+         FROM entity_notes en
+         WHERE en.entity_type = erm.entity_type AND en.entity_id = erm.entity_id
+       ) n ON true
        WHERE ($1::text IS NULL OR erm.entity_type = $1)
        ORDER BY erm.risk_score DESC, erm.updated_at DESC
        LIMIT $2`,
@@ -1124,6 +1187,7 @@ export const createApp = () => {
   });
 
   app.get("/risk/entities/:type/:id", async (req, res) => {
+    await ensureRiskOpsTables();
     const result = await query(
       `SELECT erm.*,
         COALESCE((
@@ -1142,13 +1206,115 @@ export const createApp = () => {
             ORDER BY t.occurred_at DESC
             LIMIT 25
           ) x
-        ), '[]'::json) AS recent_transactions
+        ), '[]'::json) AS recent_transactions,
+        COALESCE((
+          SELECT json_agg(row_to_json(w) ORDER BY w.created_at DESC)
+          FROM entity_watchlist w
+          WHERE w.entity_type = erm.entity_type AND w.entity_id = erm.entity_id
+        ), '[]'::json) AS watchlist_actions,
+        COALESCE((
+          SELECT json_agg(row_to_json(o) ORDER BY o.created_at DESC)
+          FROM entity_risk_overrides o
+          WHERE o.entity_type = erm.entity_type AND o.entity_id = erm.entity_id
+        ), '[]'::json) AS overrides,
+        COALESCE((
+          SELECT json_agg(row_to_json(n) ORDER BY n.created_at DESC)
+          FROM entity_notes n
+          WHERE n.entity_type = erm.entity_type AND n.entity_id = erm.entity_id
+        ), '[]'::json) AS notes
        FROM entity_risk_memory erm
        WHERE erm.entity_type = $1 AND erm.entity_id = $2`,
       [req.params.type, req.params.id]
     );
     if (!result.rowCount) return res.status(404).json({ error: "entity_risk_not_found" });
     res.json(result.rows[0]);
+  });
+
+  app.post("/risk/entities/:type/:id/watchlist", security.requireAuth("analyst"), async (req, res, next) => {
+    try {
+      await ensureRiskOpsTables();
+      const body = z.object({
+        action: z.enum(["monitor", "block", "allow"]).default("monitor"),
+        reason: z.string().min(3).default("Analyst action from Risk Memory"),
+        actor: z.string().min(2).default("demo-risk")
+      }).parse(req.body ?? {});
+      const entityType = z.enum(["user", "card", "merchant", "device", "ip"]).parse(req.params.type);
+      const inserted = await query(
+        `INSERT INTO entity_watchlist (entity_type, entity_id, action, reason, created_by)
+         VALUES ($1,$2,$3,$4,$5)
+         ON CONFLICT (entity_type, entity_id, action, status)
+         DO UPDATE SET reason = EXCLUDED.reason, created_by = EXCLUDED.created_by, created_at = now()
+         RETURNING *`,
+        [entityType, req.params.id, body.action, body.reason, body.actor]
+      );
+      await query(
+        "INSERT INTO audit_logs (actor, action, entity_type, entity_id, payload) VALUES ($1,'entity_watchlisted',$2,$3,$4)",
+        [body.actor, entityType, req.params.id, JSON.stringify({ action: body.action, reason: body.reason })]
+      );
+      res.status(201).json(inserted.rows[0]);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/risk/entities/:type/:id/override", security.requireAuth("analyst"), async (req, res, next) => {
+    try {
+      await ensureRiskOpsTables();
+      const body = z.object({
+        riskDelta: z.number().min(-50).max(50),
+        reason: z.string().min(3),
+        expiresHours: z.number().int().min(1).max(720).optional(),
+        actor: z.string().min(2).default("demo-risk")
+      }).parse(req.body ?? {});
+      const entityType = z.enum(["user", "card", "merchant", "device", "ip"]).parse(req.params.type);
+      const inserted = await query(
+        `INSERT INTO entity_risk_overrides (entity_type, entity_id, risk_delta, reason, expires_at, created_by)
+         VALUES ($1,$2,$3,$4,CASE WHEN $5::int IS NULL THEN NULL ELSE now() + ($5 || ' hours')::interval END,$6)
+         RETURNING *`,
+        [entityType, req.params.id, body.riskDelta, body.reason, body.expiresHours ?? null, body.actor]
+      );
+      await query(
+        `UPDATE entity_risk_memory
+         SET risk_score = GREATEST(0, LEAST(99, risk_score + $1)), updated_at = now(),
+             evidence = jsonb_set(COALESCE(evidence, '{}'::jsonb), '{latestRiskOverride}', $2::jsonb, true)
+         WHERE entity_type = $3 AND entity_id = $4`,
+        [
+          body.riskDelta,
+          JSON.stringify({ riskDelta: body.riskDelta, reason: body.reason, actor: body.actor, at: new Date().toISOString() }),
+          entityType,
+          req.params.id
+        ]
+      );
+      await query(
+        "INSERT INTO audit_logs (actor, action, entity_type, entity_id, payload) VALUES ($1,'entity_risk_override',$2,$3,$4)",
+        [body.actor, entityType, req.params.id, JSON.stringify({ riskDelta: body.riskDelta, reason: body.reason, expiresHours: body.expiresHours ?? null })]
+      );
+      res.status(201).json(inserted.rows[0]);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/risk/entities/:type/:id/notes", security.requireAuth("analyst"), async (req, res, next) => {
+    try {
+      await ensureRiskOpsTables();
+      const body = z.object({
+        note: z.string().min(3),
+        actor: z.string().min(2).default("demo-risk")
+      }).parse(req.body ?? {});
+      const entityType = z.enum(["user", "card", "merchant", "device", "ip"]).parse(req.params.type);
+      const inserted = await query(
+        "INSERT INTO entity_notes (entity_type, entity_id, note, created_by) VALUES ($1,$2,$3,$4) RETURNING *",
+        [entityType, req.params.id, body.note, body.actor]
+      );
+      await query(
+        "INSERT INTO audit_logs (actor, action, entity_type, entity_id, payload) VALUES ($1,'entity_note_added',$2,$3,$4)",
+        [body.actor, entityType, req.params.id, JSON.stringify({ note: body.note })]
+      );
+      res.status(201).json(inserted.rows[0]);
+    } catch (error) {
+      next(error);
+    }
   });
 
   app.get("/rules", async (_req, res) => {
@@ -1620,14 +1786,21 @@ export const createApp = () => {
         title TEXT NOT NULL,
         description TEXT NOT NULL,
         evidence JSONB NOT NULL DEFAULT '{}',
+        assigned_to TEXT,
+        resolution_note TEXT,
         first_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
         last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
         resolved_at TIMESTAMPTZ
       );
 
+      ALTER TABLE data_quality_alerts
+        ADD COLUMN IF NOT EXISTS assigned_to TEXT,
+        ADD COLUMN IF NOT EXISTS resolution_note TEXT;
+
       CREATE INDEX IF NOT EXISTS idx_quality_runs_created ON data_quality_runs(created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_quality_alerts_status_severity ON data_quality_alerts(status, severity, last_seen_at DESC);
       CREATE INDEX IF NOT EXISTS idx_quality_alerts_type_title_open ON data_quality_alerts(alert_type, title) WHERE status = 'open';
+      CREATE INDEX IF NOT EXISTS idx_quality_alerts_assignee ON data_quality_alerts(assigned_to, status, last_seen_at DESC);
     `);
   };
 
@@ -1813,6 +1986,53 @@ export const createApp = () => {
         [body.actor, run.id, JSON.stringify({ summary: overview.summary })]
       );
       res.status(201).json({ run, ...updatedOverview });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/quality/alerts/:id/assign", security.requireAuth("analyst"), async (req, res, next) => {
+    try {
+      await ensureDataQualityTables();
+      const body = z.object({
+        assignedTo: z.string().min(2).default("data.ops"),
+        actor: z.string().min(2).default("demo-quality")
+      }).parse(req.body ?? {});
+      const result = await query(
+        "UPDATE data_quality_alerts SET assigned_to = $1, last_seen_at = now() WHERE id = $2 RETURNING *",
+        [body.assignedTo, req.params.id]
+      );
+      if (!result.rowCount) return res.status(404).json({ error: "quality_alert_not_found" });
+      await query(
+        "INSERT INTO audit_logs (actor, action, entity_type, entity_id, payload) VALUES ($1,'quality_alert_assigned','data_quality_alert',$2,$3)",
+        [body.actor, req.params.id, JSON.stringify({ assignedTo: body.assignedTo })]
+      );
+      res.json(result.rows[0]);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/quality/alerts/:id/resolve", security.requireAuth("analyst"), async (req, res, next) => {
+    try {
+      await ensureDataQualityTables();
+      const body = z.object({
+        note: z.string().min(3).default("Resolved by data quality analyst."),
+        actor: z.string().min(2).default("demo-quality")
+      }).parse(req.body ?? {});
+      const result = await query(
+        `UPDATE data_quality_alerts
+         SET status = 'resolved', resolution_note = $1, resolved_at = now(), last_seen_at = now()
+         WHERE id = $2
+         RETURNING *`,
+        [body.note, req.params.id]
+      );
+      if (!result.rowCount) return res.status(404).json({ error: "quality_alert_not_found" });
+      await query(
+        "INSERT INTO audit_logs (actor, action, entity_type, entity_id, payload) VALUES ($1,'quality_alert_resolved','data_quality_alert',$2,$3)",
+        [body.actor, req.params.id, JSON.stringify({ note: body.note })]
+      );
+      res.json(result.rows[0]);
     } catch (error) {
       next(error);
     }
@@ -2042,7 +2262,39 @@ export const createApp = () => {
         (SELECT COALESCE(avg(latency_ms), 0) FROM fraud_scores WHERE created_at > now() - interval '1 hour') AS avg_latency_ms`
     );
     const counts = await scoringQueue.getJobCounts("waiting", "active", "failed", "delayed");
-    res.json({ ...result.rows[0], queue: counts });
+    const [dbHealth, workerFreshness, eventFreshness] = await Promise.all([
+      query("SELECT now() AS checked_at"),
+      query("SELECT max(created_at) AS latest_score_at FROM fraud_scores"),
+      query("SELECT max(created_at) AS latest_event_at FROM transaction_events")
+    ]);
+    const latestScoreAt = workerFreshness.rows[0]?.latest_score_at ? new Date(workerFreshness.rows[0].latest_score_at) : null;
+    const latestEventAt = eventFreshness.rows[0]?.latest_event_at ? new Date(eventFreshness.rows[0].latest_event_at) : null;
+    const scoreAgeSeconds = latestScoreAt ? Math.round((Date.now() - latestScoreAt.getTime()) / 1000) : null;
+    const eventAgeSeconds = latestEventAt ? Math.round((Date.now() - latestEventAt.getTime()) / 1000) : null;
+    const queueBacklog = Number(counts.waiting ?? 0) + Number(counts.delayed ?? 0);
+    res.json({
+      ...result.rows[0],
+      queue: counts,
+      serviceHealth: [
+        { service: "api", status: "healthy", detail: "Express API responding", uptimeSeconds: Math.round(process.uptime()) },
+        { service: "postgres", status: "healthy", detail: `Database responded at ${dbHealth.rows[0].checked_at}` },
+        {
+          service: "worker",
+          status: scoreAgeSeconds == null ? "unknown" : scoreAgeSeconds > 300 ? "warning" : "healthy",
+          detail: scoreAgeSeconds == null ? "No scored transactions yet" : `Latest score ${scoreAgeSeconds}s ago`
+        },
+        {
+          service: "queue",
+          status: Number(counts.failed ?? 0) > 0 ? "warning" : queueBacklog > 100 ? "warning" : "healthy",
+          detail: `${counts.waiting ?? 0} waiting, ${counts.active ?? 0} active, ${counts.failed ?? 0} failed`
+        },
+        {
+          service: "events",
+          status: eventAgeSeconds == null ? "unknown" : eventAgeSeconds > 300 ? "warning" : "healthy",
+          detail: eventAgeSeconds == null ? "No event rows yet" : `Latest event ${eventAgeSeconds}s ago`
+        }
+      ]
+    });
   });
 
   app.get("/reports/alerts.csv", security.requireAuth("analyst"), async (req, res) => {

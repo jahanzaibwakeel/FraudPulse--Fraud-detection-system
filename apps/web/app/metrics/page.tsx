@@ -10,6 +10,7 @@ type Overview = {
   pending_reviews: string;
   avg_latency_ms: string;
   queue: { waiting: number; active: number; failed: number; delayed: number };
+  serviceHealth: Array<{ service: string; status: string; detail: string; uptimeSeconds?: number }>;
 };
 
 export default function MetricsPage() {
@@ -31,6 +32,22 @@ export default function MetricsPage() {
       </section>
       <section className="panel formRow">
         <p>Prometheus scrapes `/metrics` from the API and worker. Grafana dashboards run in local/private monitoring mode and should stay behind authentication, a VPN, or an SSH tunnel rather than being exposed publicly.</p>
+      </section>
+      <section className="panel">
+        <div className="panelHeader"><h2>Service Health</h2><strong>{overview?.serviceHealth?.length ?? 0} checks</strong></div>
+        <table>
+          <thead><tr><th>Service</th><th>Status</th><th>Detail</th><th>Uptime</th></tr></thead>
+          <tbody>
+            {overview?.serviceHealth?.map(item => (
+              <tr key={item.service}>
+                <td>{item.service}</td>
+                <td>{item.status}</td>
+                <td>{item.detail}</td>
+                <td>{item.uptimeSeconds ? `${Math.floor(item.uptimeSeconds / 60)}m` : "n/a"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </section>
     </div>
   );

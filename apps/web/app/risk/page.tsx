@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { RefreshCw, Target } from "lucide-react";
-import { apiGet } from "../lib/api";
+import { apiGet, apiPost } from "../lib/api";
 import { MetricTile } from "../components/MetricTile";
 import { StatusPill } from "../components/StatusPill";
 
@@ -21,6 +21,10 @@ type EntityRisk = {
   last_seen_at: string;
   updated_at: string;
   evidence: Record<string, unknown>;
+  watchlist_actions: Array<{ action: string; reason: string; createdBy: string; createdAt: string }>;
+  override_count: string;
+  active_override_delta: string;
+  note_count: string;
 };
 
 type RiskSummary = {
@@ -47,6 +51,9 @@ const severityFor = (score: number) => {
 export default function RiskMemoryPage() {
   const [data, setData] = useState<RiskResponse | null>(null);
   const [filter, setFilter] = useState("all");
+  const [actionMessage, setActionMessage] = useState("");
+  const [note, setNote] = useState("Manual analyst note from Risk Memory.");
+  const [overrideDelta, setOverrideDelta] = useState(10);
 
   const refresh = async (nextFilter = filter) => {
     const query = nextFilter === "all" ? "" : `?type=${nextFilter}`;
@@ -60,6 +67,39 @@ export default function RiskMemoryPage() {
   const topEntity = data?.entities[0];
   const totalEntities = data?.summary.reduce((sum, item) => sum + Number(item.entity_count), 0) ?? 0;
   const highRiskCount = data?.entities.filter(entity => Number(entity.risk_score) >= 60).length ?? 0;
+
+  const actOnTopEntity = async (action: "monitor" | "block" | "allow") => {
+    if (!topEntity) return;
+    await apiPost(`/risk/entities/${topEntity.entity_type}/${encodeURIComponent(topEntity.entity_id)}/watchlist`, {
+      action,
+      reason: `${action} requested from Risk Memory`,
+      actor: "demo-risk"
+    });
+    setActionMessage(`${topEntity.label || topEntity.entity_id} marked as ${action}.`);
+    await refresh();
+  };
+
+  const addOverride = async () => {
+    if (!topEntity) return;
+    await apiPost(`/risk/entities/${topEntity.entity_type}/${encodeURIComponent(topEntity.entity_id)}/override`, {
+      riskDelta: overrideDelta,
+      reason: `Manual ${overrideDelta > 0 ? "risk boost" : "risk reduction"} from analyst review`,
+      expiresHours: 72,
+      actor: "demo-risk"
+    });
+    setActionMessage(`Applied ${overrideDelta > 0 ? "+" : ""}${overrideDelta} risk override for 72 hours.`);
+    await refresh();
+  };
+
+  const addNote = async () => {
+    if (!topEntity || !note.trim()) return;
+    await apiPost(`/risk/entities/${topEntity.entity_type}/${encodeURIComponent(topEntity.entity_id)}/notes`, {
+      note,
+      actor: "demo-risk"
+    });
+    setActionMessage("Analyst note saved.");
+    await refresh();
+  };
 
   return (
     <div className="screen">
@@ -107,6 +147,22 @@ export default function RiskMemoryPage() {
           <div className="modelHero">
             <h2>{topEntity?.label ?? "No entity selected"}</h2>
             <p>{topEntity ? JSON.stringify(topEntity.evidence) : "Risk memory will populate as transactions are scored."}</p>
+            {topEntity && (
+              <div className="formRow">
+                <div className="split">
+                  <button className="primary" onClick={() => actOnTopEntity("monitor")}>Watch</button>
+                  <button className="primary" onClick={() => actOnTopEntity("block")}>Block</button>
+                  <button className="primary" onClick={() => actOnTopEntity("allow")}>Allow</button>
+                </div>
+                <div className="split">
+                  <input type="number" min={-50} max={50} value={overrideDelta} onChange={event => setOverrideDelta(Number(event.target.value))} aria-label="Risk override delta" />
+                  <button className="primary" onClick={addOverride}>Apply Risk Override</button>
+                </div>
+                <textarea value={note} onChange={event => setNote(event.target.value)} rows={3} aria-label="Entity note" />
+                <button className="primary" onClick={addNote}>Save Entity Note</button>
+                <small>{actionMessage || `${topEntity.watchlist_actions?.length ?? 0} active actions / ${topEntity.note_count ?? 0} notes`}</small>
+              </div>
+            )}
           </div>
         </div>
       </section>
@@ -114,13 +170,14 @@ export default function RiskMemoryPage() {
       <section className="panel">
         <div className="panelHeader"><h2>Highest Risk Entities</h2><strong>{filter}</strong></div>
         <table>
-          <thead><tr><th>Entity</th><th>Type</th><th>Risk</th><th>Velocity</th><th>Anomaly</th><th>Alerts</th><th>Transactions</th><th>Last Seen</th></tr></thead>
+          <thead><tr><th>Entity</th><th>Type</th><th>Risk</th><th>Actions</th><th>Velocity</th><th>Anomaly</th><th>Alerts</th><th>Transactions</th><th>Last Seen</th></tr></thead>
           <tbody>
             {data?.entities.map(entity => (
               <tr key={`${entity.entity_type}-${entity.entity_id}`}>
                 <td>{entity.label || entity.entity_id}<small>{entity.category}</small></td>
                 <td>{entity.entity_type}</td>
                 <td><StatusPill value={severityFor(Number(entity.risk_score))} /> {Number(entity.risk_score).toFixed(1)}</td>
+                <td>{entity.watchlist_actions?.map(action => action.action).join(", ") || "none"}<small>{Number(entity.active_override_delta) ? `${Number(entity.active_override_delta) > 0 ? "+" : ""}${Number(entity.active_override_delta)} override` : `${entity.note_count ?? 0} notes`}</small></td>
                 <td>{Number(entity.velocity_score).toFixed(1)}</td>
                 <td>{Number(entity.anomaly_score).toFixed(1)}</td>
                 <td>{entity.alert_count}</td>

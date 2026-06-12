@@ -25,6 +25,8 @@ type QualityAlert = {
   title: string;
   description: string;
   evidence: Record<string, unknown>;
+  assigned_to?: string | null;
+  resolution_note?: string | null;
   first_seen_at: string;
   last_seen_at: string;
 };
@@ -95,6 +97,16 @@ export default function QualityPage() {
     }
   };
 
+  const assignAlert = async (id: string) => {
+    await apiPost(`/quality/alerts/${id}/assign`, { assignedTo: "data.ops", actor: "demo-quality" });
+    await refresh();
+  };
+
+  const resolveAlert = async (id: string) => {
+    await apiPost(`/quality/alerts/${id}/resolve`, { note: "Reviewed and accepted by data operations.", actor: "demo-quality" });
+    await refresh();
+  };
+
   return (
     <div className="screen">
       <header className="topbar">
@@ -163,9 +175,13 @@ export default function QualityPage() {
             {overview?.alerts.map(alert => (
               <div className="timelineItem" key={alert.id}>
                 <strong>{alert.title}</strong>
-                <span>{alert.alert_type} - {alert.severity} - last seen {new Date(alert.last_seen_at).toLocaleString()}</span>
+                <span>{alert.alert_type} - {alert.severity} - owner {alert.assigned_to ?? "unassigned"} - last seen {new Date(alert.last_seen_at).toLocaleString()}</span>
                 <p>{alert.description}</p>
                 <small>{JSON.stringify(alert.evidence)}</small>
+                <div className="split">
+                  <button className="primary" onClick={() => assignAlert(alert.id)}>Assign</button>
+                  <button className="primary" onClick={() => resolveAlert(alert.id)}>Resolve</button>
+                </div>
               </div>
             ))}
             {!overview?.alerts.length && <div className="timelineItem"><strong>No open quality alerts</strong><span>Run checks to persist the current state.</span></div>}
