@@ -44,6 +44,7 @@ type RegistryModelRow = {
   metrics: Record<string, unknown>;
   active: boolean;
   created_at: string;
+  approval?: Record<string, unknown> | null;
 };
 
 type ShadowRunRow = {
@@ -1427,6 +1428,27 @@ export const createApp = () => {
     res.json({ ...summary.rows[0], topAnomalies: topAnomalies.rows });
   });
 
+  app.get("/features/trends", async (req, res) => {
+    const lookbackHours = Math.min(Math.max(Number(req.query.lookbackHours ?? 6), 1), 72);
+    const result = await query(
+      `SELECT
+        date_trunc('hour', tf.created_at) AS bucket,
+        count(*) AS feature_count,
+        COALESCE(avg(tf.velocity_5m), 0) AS avg_velocity_5m,
+        COALESCE(avg(abs(tf.amount_zscore)), 0) AS avg_abs_amount_zscore,
+        COALESCE(avg(tf.geo_kmh), 0) AS avg_geo_kmh,
+        COALESCE(avg(CASE WHEN tf.device_seen THEN 0 ELSE 1 END), 0) AS new_device_rate,
+        COALESCE(avg(fs.score), 0) AS avg_score
+       FROM transaction_features tf
+       LEFT JOIN fraud_scores fs ON fs.transaction_id = tf.transaction_id
+       WHERE tf.created_at >= now() - ($1 || ' hours')::interval
+       GROUP BY date_trunc('hour', tf.created_at)
+       ORDER BY bucket ASC`,
+      [lookbackHours]
+    );
+    res.json({ lookbackHours, points: result.rows });
+  });
+
   app.get("/features/transactions/:id", async (req, res) => {
     const result = await query(
       `SELECT tf.*, t.amount, t.currency, t.channel, t.occurred_at, u.full_name, m.name AS merchant_name, fs.score, fs.severity
@@ -1566,9 +1588,19 @@ export const createApp = () => {
         created_at TIMESTAMPTZ NOT NULL DEFAULT now()
       );
 
+      CREATE TABLE IF NOT EXISTS model_approval_reviews (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        model_version_id UUID NOT NULL REFERENCES model_versions(id),
+        decision TEXT NOT NULL CHECK (decision IN ('approved', 'rejected')),
+        reviewer TEXT NOT NULL,
+        notes TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
       CREATE INDEX IF NOT EXISTS idx_model_benchmark_runs_created ON model_benchmark_runs(created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_model_shadow_runs_created ON model_shadow_runs(created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_model_shadow_runs_candidate ON model_shadow_runs(candidate_model_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_model_approval_model_created ON model_approval_reviews(model_version_id, created_at DESC);
     `);
   };
 
@@ -1632,9 +1664,16 @@ export const createApp = () => {
   app.get("/models/registry", async (_req, res) => {
     await ensureModelRunTables();
     const models = await query<RegistryModelRow>(
-      `SELECT id, version, parameters, metrics, active, created_at
-       FROM model_versions
-       ORDER BY active DESC, created_at DESC
+      `SELECT mv.id, mv.version, mv.parameters, mv.metrics, mv.active, mv.created_at, row_to_json(approval.*) AS approval
+       FROM model_versions mv
+       LEFT JOIN LATERAL (
+         SELECT decision, reviewer, notes, created_at
+         FROM model_approval_reviews mar
+         WHERE mar.model_version_id = mv.id
+         ORDER BY mar.created_at DESC
+         LIMIT 1
+       ) approval ON true
+       ORDER BY mv.active DESC, mv.created_at DESC
        LIMIT 60`
     );
     const shadowRuns = await query<ShadowRunRow>(
@@ -1708,6 +1747,35 @@ export const createApp = () => {
         [body.actor, previous.rows[0].id, JSON.stringify({ previousChampion: current.rows[0] ?? null, restored: champion.rows[0] })]
       );
       res.json({ previousChampion: current.rows[0] ?? null, champion: champion.rows[0] });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/models/:id/approval", security.requireAuth("admin"), async (req, res, next) => {
+    try {
+      await ensureModelRunTables();
+      const body = z.object({
+        decision: z.enum(["approved", "rejected"]),
+        reviewer: z.string().min(2).default("lead.ops"),
+        notes: z.string().min(3).default("Reviewed from Model Registry.")
+      }).parse(req.body ?? {});
+      const model = await query<RegistryModelRow>(
+        "SELECT id, version FROM model_versions WHERE id = $1",
+        [req.params.id]
+      );
+      if (!model.rowCount) return res.status(404).json({ error: "model_not_found" });
+      const review = await query(
+        `INSERT INTO model_approval_reviews (model_version_id, decision, reviewer, notes)
+         VALUES ($1,$2,$3,$4)
+         RETURNING *`,
+        [req.params.id, body.decision, body.reviewer, body.notes]
+      );
+      await query(
+        "INSERT INTO audit_logs (actor, action, entity_type, entity_id, payload) VALUES ($1,'model_approval_review','model_version',$2,$3)",
+        [body.reviewer, req.params.id, JSON.stringify({ decision: body.decision, notes: body.notes, version: model.rows[0].version })]
+      );
+      res.status(201).json(review.rows[0]);
     } catch (error) {
       next(error);
     }

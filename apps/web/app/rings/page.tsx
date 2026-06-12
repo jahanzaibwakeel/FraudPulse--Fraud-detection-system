@@ -62,6 +62,7 @@ const positions = [
 export default function RingsPage() {
   const [graph, setGraph] = useState<RingGraph | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [investigations, setInvestigations] = useState<RingInvestigation[]>([]);
   const [message, setMessage] = useState("");
 
@@ -92,6 +93,7 @@ export default function RingsPage() {
     return { ...node, x: point[0], y: point[1] };
   };
   const visualNodes = selected?.nodes.slice(0, 9).map(nodePosition) ?? [];
+  const selectedNode = selected?.nodes.find(node => node.id === selectedNodeId) ?? visualNodes[0] ?? null;
 
   const createInvestigation = async () => {
     if (!selected) return;
@@ -172,9 +174,17 @@ export default function RingsPage() {
                 ));
             })}
             {visualNodes.map(node => (
-              <div className={`graphNode ${node.type}`} key={node.id} style={{ left: `${node.x}%`, top: `${node.y}%` }}>
+              <div
+                className={`graphNode ${node.type}`}
+                key={node.id}
+                role="button"
+                tabIndex={0}
+                onClick={() => setSelectedNodeId(node.id)}
+                onKeyDown={event => { if (event.key === "Enter") setSelectedNodeId(node.id); }}
+                style={{ left: `${node.x}%`, top: `${node.y}%`, outline: selectedNodeId === node.id ? "2px solid #f4b44d" : undefined }}
+              >
                 <strong>{node.label}</strong>
-                <span>{node.type} · {Math.round(node.risk)}</span>
+                <span>{node.type} - {Math.round(node.risk)}</span>
               </div>
             ))}
           </div>
@@ -183,6 +193,13 @@ export default function RingsPage() {
         <aside className="panel">
           <div className="panelHeader"><h2>Shared Signals</h2></div>
           <div className="timeline">
+            {selectedNode && (
+              <div className="timelineItem">
+                <strong>{selectedNode.label}</strong>
+                <span>{selectedNode.type} - risk {Math.round(selectedNode.risk)} - {selectedNode.transactionCount} suspicious transactions</span>
+                <p>{selectedNode.transactionCount > 1 ? "This entity is reused across suspicious activity and should be reviewed as a connector." : "This entity appears in the selected ring as supporting context."}</p>
+              </div>
+            )}
             {investigations.slice(0, 3).map(item => (
               <div className="timelineItem" key={item.id}>
                 <strong>{item.ring_id} investigation</strong>
@@ -207,3 +224,4 @@ export default function RingsPage() {
     </div>
   );
 }
+

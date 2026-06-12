@@ -17,6 +17,7 @@ type ModelVersion = {
   metrics?: { precision?: number; recall?: number; f1Score?: number; validationSize?: number };
   active: boolean;
   created_at: string;
+  approval?: { decision: string; reviewer: string; notes: string; created_at: string } | null;
 };
 
 type Registry = {
@@ -125,6 +126,21 @@ export default function ModelsPage() {
     }
   };
 
+  const reviewModel = async (modelId: string, decision: "approved" | "rejected") => {
+    setBusy(true);
+    try {
+      await apiPost(`/models/${modelId}/approval`, {
+        decision,
+        reviewer: "lead.ops",
+        notes: `${decision} from Model Registry governance review.`
+      });
+      setMessage(`Model ${decision}.`);
+      await refresh();
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div className="screen">
       <header className="topbar">
@@ -210,12 +226,13 @@ export default function ModelsPage() {
       <section className="panel">
         <div className="panelHeader"><h2>Model Versions</h2><Rocket size={18} /></div>
         <table>
-          <thead><tr><th>Version</th><th>Status</th><th>Kind</th><th>F1</th><th>Samples</th><th>Created</th><th>Action</th></tr></thead>
+          <thead><tr><th>Version</th><th>Status</th><th>Approval</th><th>Kind</th><th>F1</th><th>Samples</th><th>Created</th><th>Action</th></tr></thead>
           <tbody>
             {registry?.models.map(model => (
               <tr key={model.id}>
                 <td>{model.version}</td>
                 <td><StatusPill value={model.active ? "champion" : "challenger"} /></td>
+                <td>{model.approval?.decision ?? "unreviewed"}<small>{model.approval?.reviewer ?? "governance pending"}</small></td>
                 <td>{model.parameters?.modelKind ?? "hand_tuned"}</td>
                 <td>{model.metrics?.f1Score?.toFixed(3) ?? "n/a"}</td>
                 <td>{model.parameters?.trainingWindow?.sampleSize ?? 0}</td>
@@ -223,6 +240,8 @@ export default function ModelsPage() {
                 <td>
                   <div className="split">
                     <button className="primary" onClick={() => { setSelectedModelId(model.id); runShadow(model.id); }} disabled={busy}>Shadow</button>
+                    <button className="primary" onClick={() => reviewModel(model.id, "approved")} disabled={busy}>Approve</button>
+                    <button className="primary" onClick={() => reviewModel(model.id, "rejected")} disabled={busy}>Reject</button>
                     <button className="primary" onClick={() => promote(model.id)} disabled={busy || model.active}>Promote</button>
                   </div>
                 </td>

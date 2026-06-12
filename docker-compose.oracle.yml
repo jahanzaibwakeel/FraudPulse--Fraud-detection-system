@@ -75,6 +75,7 @@ services:
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:?NEXT_PUBLIC_API_URL is required}
         NEXT_PUBLIC_WS_URL: ${NEXT_PUBLIC_WS_URL:?NEXT_PUBLIC_WS_URL is required}
         NEXT_PUBLIC_API_TOKEN: ${NEXT_PUBLIC_API_TOKEN:?NEXT_PUBLIC_API_TOKEN is required}
+        NEXT_PUBLIC_REFRESH_MS: ${NEXT_PUBLIC_REFRESH_MS:-10000}
     env_file: .env
     expose:
       - "3000"
