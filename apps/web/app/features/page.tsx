@@ -36,9 +36,21 @@ type FeatureOverview = {
   topAnomalies: FeatureRow[];
 };
 
+type FeatureExplanation = {
+  transaction: FeatureRow & { channel: string; occurred_at: string; reasons: unknown[] };
+  featureCards: Array<{ feature: string; label: string; value: number; severity: string; explanation: string }>;
+  topDrivers: Array<{ feature: string; label: string; value: number; severity: string; explanation: string }>;
+  recommendation: string;
+};
+
 export default function FeaturesPage() {
   const [overview, setOverview] = useState<FeatureOverview | null>(null);
+  const [selected, setSelected] = useState<FeatureExplanation | null>(null);
   const refresh = () => apiGet<FeatureOverview>("/features/overview").then(setOverview);
+
+  const explain = async (transactionId: string) => {
+    setSelected(await apiGet<FeatureExplanation>(`/features/transactions/${transactionId}/explain`));
+  };
 
   useEffect(() => {
     refresh();
@@ -67,7 +79,7 @@ export default function FeaturesPage() {
       <section className="panel">
         <div className="panelHeader"><h2>Top Feature Anomalies</h2></div>
         <table>
-          <thead><tr><th>Transaction</th><th>Customer</th><th>Merchant</th><th>Velocity</th><th>Amount Z</th><th>Geo</th><th>Device</th><th>Score</th></tr></thead>
+          <thead><tr><th>Transaction</th><th>Customer</th><th>Merchant</th><th>Velocity</th><th>Amount Z</th><th>Geo</th><th>Device</th><th>Score</th><th>Action</th></tr></thead>
           <tbody>
             {overview?.topAnomalies.map(row => (
               <tr key={row.transaction_id}>
@@ -79,10 +91,32 @@ export default function FeaturesPage() {
                 <td>{Number(row.geo_kmh).toFixed(0)} km/h</td>
                 <td><StatusPill value={row.device_seen ? "known" : "new_device"} /></td>
                 <td><StatusPill value={row.severity} /><small>{Number(row.score).toFixed(0)}</small></td>
+                <td><button className="primary" onClick={() => explain(row.transaction_id)}>Explain</button></td>
               </tr>
             ))}
           </tbody>
         </table>
+      </section>
+
+      <section className="panel">
+        <div className="panelHeader"><h2>Feature Explanation</h2><strong>{selected?.transaction.transaction_id?.slice(0, 8) ?? "none"}</strong></div>
+        {selected ? (
+          <div className="timeline">
+            <div className="timelineItem">
+              <strong>{selected.transaction.full_name} at {selected.transaction.merchant_name}</strong>
+              <span>{selected.recommendation}</span>
+            </div>
+            {selected.featureCards.map(card => (
+              <div className="timelineItem" key={card.feature}>
+                <strong>{card.label}</strong>
+                <span>{card.severity} - value {Number(card.value).toFixed(2)}</span>
+                <p>{card.explanation}</p>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="timelineItem"><strong>No transaction selected</strong><span>Click Explain on an anomaly row to inspect scoring features.</span></div>
+        )}
       </section>
     </div>
   );

@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { Network, RefreshCw } from "lucide-react";
-import { apiGet } from "../lib/api";
+import { apiGet, apiPost } from "../lib/api";
 import { MetricTile } from "../components/MetricTile";
 
 type RingNode = {
@@ -38,6 +38,15 @@ type RingGraph = {
   edges: RingEdge[];
 };
 
+type RingInvestigation = {
+  id: string;
+  ring_id: string;
+  risk_score: string;
+  status: string;
+  assigned_to: string;
+  created_at: string;
+};
+
 const positions = [
   [50, 8],
   [82, 24],
@@ -53,10 +62,16 @@ const positions = [
 export default function RingsPage() {
   const [graph, setGraph] = useState<RingGraph | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [investigations, setInvestigations] = useState<RingInvestigation[]>([]);
+  const [message, setMessage] = useState("");
 
   const refresh = async () => {
-    const next = await apiGet<RingGraph>("/graph/rings?lookbackHours=24&minScore=55");
+    const [next, investigationData] = await Promise.all([
+      apiGet<RingGraph>("/graph/rings?lookbackHours=24&minScore=55"),
+      apiGet<{ investigations: RingInvestigation[] }>("/graph/ring-investigations")
+    ]);
     setGraph(next);
+    setInvestigations(investigationData.investigations);
     setSelectedId(current => current ?? next.rings[0]?.id ?? null);
   };
 
@@ -77,6 +92,17 @@ export default function RingsPage() {
     return { ...node, x: point[0], y: point[1] };
   };
   const visualNodes = selected?.nodes.slice(0, 9).map(nodePosition) ?? [];
+
+  const createInvestigation = async () => {
+    if (!selected) return;
+    const created = await apiPost<RingInvestigation>("/graph/ring-investigations", {
+      actor: "demo-ring",
+      assignedTo: "casey.ops",
+      ring: selected
+    });
+    setMessage(`Investigation ${created.id.slice(0, 8)} opened for ${selected.id}.`);
+    await refresh();
+  };
 
   return (
     <div className="screen">
@@ -121,6 +147,10 @@ export default function RingsPage() {
             <h2>{selected ? `${selected.id} Entity Graph` : "No Rings Detected"}</h2>
             <strong>{selected ? `${selected.riskScore}/100` : ""}</strong>
           </div>
+          <div className="split" style={{ padding: "12px" }}>
+            <button className="primary" onClick={createInvestigation} disabled={!selected}>Create Investigation</button>
+            <small>{message || "Open a durable case when a connected entity cluster needs analyst review."}</small>
+          </div>
           <div className="graphCanvas">
             {selected && visualNodes.map((node, index) => {
               const links = selected.edges
@@ -153,6 +183,12 @@ export default function RingsPage() {
         <aside className="panel">
           <div className="panelHeader"><h2>Shared Signals</h2></div>
           <div className="timeline">
+            {investigations.slice(0, 3).map(item => (
+              <div className="timelineItem" key={item.id}>
+                <strong>{item.ring_id} investigation</strong>
+                <span>{item.status} - {item.assigned_to} - risk {Number(item.risk_score).toFixed(0)}</span>
+              </div>
+            ))}
             {topShared.map(node => (
               <div className="timelineItem" key={node.id}>
                 <strong>{node.label}</strong>

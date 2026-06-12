@@ -1442,6 +1442,69 @@ export const createApp = () => {
     res.json(result.rows[0]);
   });
 
+  app.get("/features/transactions/:id/explain", async (req, res) => {
+    const result = await query(
+      `SELECT tf.*, t.amount, t.currency, t.channel, t.occurred_at, u.full_name, m.name AS merchant_name, fs.score, fs.severity, fs.reasons
+       FROM transaction_features tf
+       JOIN transactions t ON t.id = tf.transaction_id
+       JOIN users u ON u.id = tf.user_id
+       JOIN merchants m ON m.id = tf.merchant_id
+       JOIN fraud_scores fs ON fs.transaction_id = tf.transaction_id
+       WHERE tf.transaction_id = $1`,
+      [req.params.id]
+    );
+    if (!result.rowCount) return res.status(404).json({ error: "features_not_found" });
+    const row = result.rows[0];
+    const featureCards = [
+      {
+        feature: "velocity_5m",
+        label: "Five-minute velocity",
+        value: Number(row.velocity_5m),
+        severity: Number(row.velocity_5m) >= 5 ? "high" : Number(row.velocity_5m) >= 3 ? "medium" : "low",
+        explanation: "Counts how many recent transactions the same user attempted in a short window."
+      },
+      {
+        feature: "amount_zscore",
+        label: "Amount anomaly",
+        value: Number(row.amount_zscore),
+        severity: Math.abs(Number(row.amount_zscore)) >= 3 ? "high" : Math.abs(Number(row.amount_zscore)) >= 2 ? "medium" : "low",
+        explanation: "Compares this amount against the user's historical spending pattern."
+      },
+      {
+        feature: "geo_kmh",
+        label: "Geo travel speed",
+        value: Number(row.geo_kmh),
+        severity: Number(row.geo_kmh) >= 850 ? "high" : Number(row.geo_kmh) >= 400 ? "medium" : "low",
+        explanation: "Estimates whether movement between transaction locations is physically plausible."
+      },
+      {
+        feature: "merchant_risk",
+        label: "Merchant risk",
+        value: Number(row.merchant_risk),
+        severity: Number(row.merchant_risk) >= 70 ? "high" : Number(row.merchant_risk) >= 45 ? "medium" : "low",
+        explanation: "Uses the merchant's historical risk profile and category."
+      },
+      {
+        feature: "device_seen",
+        label: "Device familiarity",
+        value: row.device_seen ? 1 : 0,
+        severity: row.device_seen ? "low" : "medium",
+        explanation: row.device_seen ? "Device has appeared before for this user." : "Device has not appeared in recent user history."
+      }
+    ];
+    const topDrivers = featureCards
+      .filter(card => card.severity !== "low")
+      .sort((a, b) => (b.severity === "high" ? 2 : 1) - (a.severity === "high" ? 2 : 1));
+    res.json({
+      transaction: row,
+      featureCards,
+      topDrivers,
+      recommendation: topDrivers.length
+        ? "Prioritize analyst review because multiple scoring features are elevated."
+        : "No major feature anomaly detected; compare against related activity before closing."
+    });
+  });
+
   app.get("/metrics/model", async (_req, res) => {
     const result = await query(
       `WITH classified AS (
@@ -1616,6 +1679,35 @@ export const createApp = () => {
         [body.actor, req.params.id, { previousChampion: previous.rows[0] ?? null, promoted: promoted.rows[0] }]
       );
       res.json({ previousChampion: previous.rows[0] ?? null, champion: promoted.rows[0] });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/models/rollback", security.requireAuth("admin"), async (req, res, next) => {
+    try {
+      const body = z.object({ actor: z.string().min(2).default("demo-mlops") }).parse(req.body ?? {});
+      const previous = await query<RegistryModelRow>(
+        `SELECT id, version, parameters, metrics, active, created_at
+         FROM model_versions
+         WHERE active = false
+         ORDER BY created_at DESC
+         LIMIT 1`
+      );
+      if (!previous.rowCount) return res.status(409).json({ error: "rollback_target_missing" });
+      const current = await query<RegistryModelRow>(
+        "SELECT id, version FROM model_versions WHERE active = true ORDER BY created_at DESC LIMIT 1"
+      );
+      await query("UPDATE model_versions SET active = false");
+      const champion = await query<RegistryModelRow>(
+        "UPDATE model_versions SET active = true WHERE id = $1 RETURNING id, version, parameters, metrics, active, created_at",
+        [previous.rows[0].id]
+      );
+      await query(
+        "INSERT INTO audit_logs (actor, action, entity_type, entity_id, payload) VALUES ($1,'model_rollback','model_version',$2,$3)",
+        [body.actor, previous.rows[0].id, JSON.stringify({ previousChampion: current.rows[0] ?? null, restored: champion.rows[0] })]
+      );
+      res.json({ previousChampion: current.rows[0] ?? null, champion: champion.rows[0] });
     } catch (error) {
       next(error);
     }
@@ -2223,6 +2315,45 @@ export const createApp = () => {
     }
   });
 
+  app.post("/models/benchmarks/:id/promote-winner", security.requireAuth("admin"), async (req, res, next) => {
+    try {
+      await ensureModelRunTables();
+      const body = z.object({ actor: z.string().min(2).default("demo-mlops") }).parse(req.body ?? {});
+      const run = await query(
+        "SELECT * FROM model_benchmark_runs WHERE id = $1",
+        [req.params.id]
+      );
+      if (!run.rowCount) return res.status(404).json({ error: "benchmark_run_not_found" });
+      const row = run.rows[0];
+      const results = Array.isArray(row.results) ? row.results : [];
+      const winner = results.find((result: { algorithm: string }) => result.algorithm === row.best_algorithm) ?? results[0];
+      if (!winner) return res.status(409).json({ error: "benchmark_winner_missing" });
+      const version = `benchmark-${winner.algorithm}-${Date.now()}`;
+      const model = await query<RegistryModelRow>(
+        `INSERT INTO model_versions (version, parameters, metrics, active)
+         VALUES ($1,$2,$3,false)
+         RETURNING id, version, parameters, metrics, active, created_at`,
+        [
+          version,
+          JSON.stringify({
+            modelKind: "benchmark_challenger",
+            trainingAlgorithm: winner.algorithm,
+            sourceBenchmarkRunId: row.id,
+            note: "Generated from benchmark winner. Shadow-test before promoting to champion."
+          }),
+          JSON.stringify(winner.metrics ?? {})
+        ]
+      );
+      await query(
+        "INSERT INTO audit_logs (actor, action, entity_type, entity_id, payload) VALUES ($1,'benchmark_winner_promoted_to_challenger','model_version',$2,$3)",
+        [body.actor, model.rows[0].id, JSON.stringify({ benchmarkRunId: row.id, winner: winner.algorithm })]
+      );
+      res.status(201).json({ model: model.rows[0], benchmarkRun: row.id, winner });
+    } catch (error) {
+      next(error);
+    }
+  });
+
   app.get("/graph/rings", async (req, res) => {
     const lookbackHours = Math.min(Math.max(Number(req.query.lookbackHours ?? 24), 1), 168);
     const minScore = Math.min(Math.max(Number(req.query.minScore ?? 55), 1), 99);
@@ -2251,6 +2382,84 @@ export const createApp = () => {
       [minScore, lookbackHours]
     );
     res.json(buildFraudRingGraph(result.rows, lookbackHours));
+  });
+
+  const ensureRingInvestigationTables = async () => {
+    await query(`
+      CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+      CREATE TABLE IF NOT EXISTS fraud_ring_investigations (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        ring_id TEXT NOT NULL,
+        risk_score NUMERIC(6, 2) NOT NULL,
+        transaction_count INTEGER NOT NULL,
+        alert_count INTEGER NOT NULL,
+        nodes JSONB NOT NULL DEFAULT '[]',
+        edges JSONB NOT NULL DEFAULT '[]',
+        strongest_signals JSONB NOT NULL DEFAULT '[]',
+        status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'closed')),
+        assigned_to TEXT NOT NULL DEFAULT 'casey.ops',
+        created_by TEXT NOT NULL DEFAULT 'system',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        closed_at TIMESTAMPTZ
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_ring_investigations_status ON fraud_ring_investigations(status, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_ring_investigations_ring ON fraud_ring_investigations(ring_id, created_at DESC);
+    `);
+  };
+
+  app.get("/graph/ring-investigations", async (_req, res, next) => {
+    try {
+      await ensureRingInvestigationTables();
+      const result = await query("SELECT * FROM fraud_ring_investigations ORDER BY created_at DESC LIMIT 30");
+      res.json({ investigations: result.rows });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/graph/ring-investigations", security.requireAuth("analyst"), async (req, res, next) => {
+    try {
+      await ensureRingInvestigationTables();
+      const body = z.object({
+        actor: z.string().min(2).default("demo-ring"),
+        assignedTo: z.string().min(2).default("casey.ops"),
+        ring: z.object({
+          id: z.string(),
+          riskScore: z.number(),
+          transactionCount: z.number().int(),
+          alertCount: z.number().int(),
+          strongestSignals: z.array(z.string()).default([]),
+          nodes: z.array(z.record(z.unknown())).default([]),
+          edges: z.array(z.record(z.unknown())).default([])
+        })
+      }).parse(req.body ?? {});
+      const inserted = await query(
+        `INSERT INTO fraud_ring_investigations
+          (ring_id, risk_score, transaction_count, alert_count, nodes, edges, strongest_signals, assigned_to, created_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+         RETURNING *`,
+        [
+          body.ring.id,
+          body.ring.riskScore,
+          body.ring.transactionCount,
+          body.ring.alertCount,
+          JSON.stringify(body.ring.nodes),
+          JSON.stringify(body.ring.edges),
+          JSON.stringify(body.ring.strongestSignals),
+          body.assignedTo,
+          body.actor
+        ]
+      );
+      await query(
+        "INSERT INTO audit_logs (actor, action, entity_type, entity_id, payload) VALUES ($1,'ring_investigation_created','fraud_ring',$2,$3)",
+        [body.actor, body.ring.id, JSON.stringify({ investigationId: inserted.rows[0].id, assignedTo: body.assignedTo })]
+      );
+      res.status(201).json(inserted.rows[0]);
+    } catch (error) {
+      next(error);
+    }
   });
 
   app.get("/admin/overview", async (_req, res) => {

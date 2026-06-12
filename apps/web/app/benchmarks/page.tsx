@@ -55,6 +55,8 @@ export default function BenchmarksPage() {
   const [runs, setRuns] = useState<BenchmarkRun[]>([]);
   const [latestResult, setLatestResult] = useState<RunResponse | null>(null);
   const [running, setRunning] = useState(false);
+  const [promoting, setPromoting] = useState(false);
+  const [message, setMessage] = useState("");
   const [maxSamples, setMaxSamples] = useState(10000);
   const [mounted, setMounted] = useState(false);
 
@@ -92,6 +94,17 @@ export default function BenchmarksPage() {
     setRunning(false);
   };
 
+  const promoteWinner = async () => {
+    if (!latestRun) return;
+    setPromoting(true);
+    try {
+      const result = await apiPost<{ model: { version: string } }>(`/models/benchmarks/${latestRun.id}/promote-winner`, { actor: "demo-mlops" });
+      setMessage(`${result.model.version} created as a challenger model. Shadow-test it in Model Registry before promotion.`);
+    } finally {
+      setPromoting(false);
+    }
+  };
+
   return (
     <div className="screen">
       <header className="topbar">
@@ -102,9 +115,11 @@ export default function BenchmarksPage() {
         <div className="topActions">
           <input type="number" min={50} max={50000} value={maxSamples} onChange={event => setMaxSamples(Number(event.target.value))} aria-label="Max samples" />
           <button className="primary" onClick={runBenchmark} disabled={running}><Play size={16} /> {running ? "Running" : "Run Benchmark"}</button>
+          <button className="primary" onClick={promoteWinner} disabled={!latestRun || promoting}>Promote Winner</button>
           <button className="iconButton" onClick={refresh} title="Refresh benchmarks"><RefreshCw size={18} /></button>
         </div>
       </header>
+      {message && <div className="notice">{message}</div>}
 
       <section className="metricGrid">
         <MetricTile label="Best algorithm" value={best?.label ?? "none"} tone="cool" />

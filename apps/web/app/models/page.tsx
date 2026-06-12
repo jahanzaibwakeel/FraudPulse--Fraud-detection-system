@@ -75,6 +75,7 @@ export default function ModelsPage() {
   const [selectedModelId, setSelectedModelId] = useState<string>("");
   const [shadow, setShadow] = useState<ShadowResult | null>(null);
   const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
 
   const refresh = async () => {
     const next = await apiGet<Registry>("/models/registry");
@@ -111,6 +112,19 @@ export default function ModelsPage() {
     }
   };
 
+  const rollback = async () => {
+    setBusy(true);
+    try {
+      const result = await apiPost<{ champion: ModelVersion }>("/models/rollback", { actor: "demo-mlops" });
+      setMessage(`Rolled back champion to ${result.champion.version}.`);
+      setShadow(null);
+      setSelectedModelId("");
+      await refresh();
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div className="screen">
       <header className="topbar">
@@ -120,9 +134,11 @@ export default function ModelsPage() {
         </div>
         <div className="topActions">
           <button className="primary" onClick={() => runShadow()} disabled={!selectedModelId || busy}><GitCompareArrows size={16} /> Shadow Score</button>
+          <button className="primary" onClick={rollback} disabled={busy}>Rollback Champion</button>
           <button className="iconButton" onClick={refresh} title="Refresh model registry"><RefreshCw size={18} /></button>
         </div>
       </header>
+      {message && <div className="notice">{message}</div>}
 
       <section className="metricGrid">
         <MetricTile label="Champion" value={registry?.champion?.version ?? "none"} tone="cool" />
